@@ -9,7 +9,6 @@ import os
 from pathlib import Path
 import queue
 import re
-import shutil
 import socket
 import subprocess
 import sys
@@ -189,10 +188,13 @@ class Agent:
         if content.count(matched) == 0 and "\r\n" in content and "\r" not in search:
             matched = search.replace("\n", "\r\n")
             replacement = replace.replace("\r\n", "\n").replace("\n", "\r\n")
-        count = content.count(matched)
+        first = content.find(matched)
+        count = 0 if first < 0 else (2 if content.find(matched, first + 1) >= 0 else 1)
         if count != 1:
-            detail = "No exact match was found" if count == 0 else f"The search block matches {count} places"
+            detail = "No exact match was found" if count == 0 else "The search block matches more than one place"
             raise ValueError(f"{detail}. No changes were written. Read the relevant file and include a larger exact block of surrounding text that matches once.")
+        if "\r\n" in content and "\n" not in content.replace("\r\n", ""):
+            replacement = replacement.replace("\r\n", "\n").replace("\n", "\r\n")
         result = self._write(target, content.replace(matched, replacement, 1),
                              allow_partial=True, preserve_bom=raw.startswith(b"\xef\xbb\xbf"))
         result["replacements"] = 0 if result.get("unchanged") else 1
@@ -219,7 +221,8 @@ class Agent:
             with path.open("rb") as existing:
                 original = existing.read(MAX_FILE_BYTES + 1)
             if original == encoded:
-                self._file_versions[path] = {"sha256": hashlib.sha256(encoded).hexdigest(), "complete": True}
+                complete_read = self._file_versions.get(path, {}).get("complete", False) if allow_partial else True
+                self._file_versions[path] = {"sha256": hashlib.sha256(encoded).hexdigest(), "complete": complete_read}
                 return {"path": str(path.relative_to(self.workspace)), "bytes_written": 0,
                         "unchanged": True, "note": "The file already has this exact content."}
             self._require_current_read(path, original, complete=not allow_partial)

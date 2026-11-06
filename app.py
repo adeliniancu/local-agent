@@ -639,7 +639,7 @@ class LocalAgentApp:
 
     def _can_send(self):
         return (self.ready and not self.updating and not self.downloading and not self.model_checking and not self._model_block_reason()
-                and not self.closing and self.workspace.is_dir() and not (self.busy and self.cancel.is_set()))
+                and not self.attachment_jobs and not self.closing and self.workspace.is_dir() and not (self.busy and self.cancel.is_set()))
 
     def _model_block_reason(self):
         if self.model_info_name != self.model_var.get().strip():
@@ -681,10 +681,12 @@ class LocalAgentApp:
             widget.configure(state=state)
         self.import_button.configure(state="normal" if self.import_path and not blocked else "disabled")
         self.profile_box.configure(state="disabled" if blocked else "readonly")
+        self.coding_preset_box.configure(state="disabled" if blocked else "readonly")
         self.model_box.configure(state=state)
         self.think_box.configure(state="disabled" if blocked or self.model_thinking_support is False else "normal")
         self.download_button.configure(state=state)
         self.send_button.configure(state="normal" if self._can_send() else "disabled")
+        self.attach_button.configure(state="disabled" if self.updating or self.closing else "normal")
 
     def refresh_hardware(self):
         if not self.background_enabled or self.hardware_checking or self.closing:
@@ -816,10 +818,11 @@ class LocalAgentApp:
             if card.winfo_exists():
                 card.destroy()
         self.inline_cards = []
+        self.chat_previews = []
         self.transcript.configure(state="normal")
         self.transcript.delete("1.0", "end")
         self.transcript.configure(state="disabled")
-        visible = [m for m in self.history if m.get("role") in ("user", "assistant") and m.get("content")]
+        visible = [m for m in self.history if m.get("role") in ("user", "assistant") and (m.get("content") or m.get("attachments"))]
         if not visible:
             self._append("A little help.\nA lot done.\n", "welcome_title")
             self._append("Ask your agent to explore a project, write code,\nfix a problem, or run a command.\n\n", "muted")
@@ -830,10 +833,13 @@ class LocalAgentApp:
             self._append("Your selected folder is the starting point.\nYou'll see file actions and command results here.", "muted")
         else:
             for message in self.history:
-                if message.get("role") in ("user", "assistant") and message.get("content"):
+                if message.get("role") in ("user", "assistant") and (message.get("content") or message.get("attachments")):
                     is_user = message["role"] == "user"
                     self._append("YOU\n" if is_user else "LOCAL AGENT\n", "user_role" if is_user else "agent_role")
-                    self._append(str(message["content"]) + "\n\n")
+                    content = message.get("_display_content", message.get("content", ""))
+                    if content:
+                        self._append(str(content) + "\n\n")
+                    self._render_attachments(message.get("attachments", []))
                 for call in message.get("tool_calls", []):
                     function = call.get("function", {})
                     if function.get("name") == "ask_user":
@@ -890,6 +896,8 @@ class LocalAgentApp:
                 self.model_tool_support = None
                 self.model_thinking_support = None
                 self.model_context_support = None
+                self.model_vision_support = None
+                self.model_context_tokens = None
                 self.model_capability_label.configure(text="Tool support: not checked yet.", fg=COLORS["muted"])
                 self.refresh_model_info()
                 self._update_model_controls()
@@ -900,6 +908,7 @@ class LocalAgentApp:
         if not self._archive_history():
             return
         self.history = []
+        self.clear_attachments()
         self._reset_command_permission()
         self.elapsed_seconds = 0.0
         self.last_tokens_per_second = None
@@ -951,6 +960,7 @@ class LocalAgentApp:
             return
         self.workspace = workspace
         self.history = history
+        self.clear_attachments()
         self.memory_state = self._history_memory_state(history) or self._clean_memory_state(saved.get("memory_state"))
         self._refresh_memory_indicator()
         self._reset_command_permission()
@@ -959,6 +969,8 @@ class LocalAgentApp:
         self.model_tool_support = None
         self.model_thinking_support = None
         self.model_context_support = None
+        self.model_vision_support = None
+        self.model_context_tokens = None
         self.folder_title.configure(text=self._short_name(workspace))
         self.folder_path.configure(text=self._short_path(workspace))
         self._render_history()
@@ -1045,6 +1057,9 @@ class LocalAgentApp:
         if self.downloading:
             self.status_label.configure(text="Wait for the model download or import to finish.")
             return
+        if self.attachment_jobs:
+            self.status_label.configure(text="Wait for the attachments to finish preparing, then send.")
+            return
         if self.model_checking:
             self.status_label.configure(text="Checking the selected model's tool support…")
             return
@@ -1059,8 +1074,16 @@ class LocalAgentApp:
             self.status_label.configure(text="Your previous folder is unavailable. Choose a folder before sending a task.")
             return
         prompt = self.input.get("1.0", "end-1c").strip()
+        attachments = copy.deepcopy(self.pending_attachments)
         model = self.model_var.get().strip()
-        if not prompt:
+        if not prompt and not attachments:
+            return
+        images = sum(item.get("kind") == "image" for item in attachments)
+        if images and self.model_vision_support is False:
+            self.status_label.configure(text="This model cannot read images. Choose a vision model or remove the image attachments.")
+            return
+        if images > 1 and self.model_context_tokens and self.model_context_tokens < 16384:
+            self.status_label.configure(text="This model's context supports one image per message. Remove extra images or choose a 16K model.")
             return
         if not model:
             self.status_label.configure(text="Choose a local model first.")
@@ -1071,24 +1094,32 @@ class LocalAgentApp:
                 return
             self.input.delete("1.0", "end")
             if self.question_request is not None:
-                self._answer_question(prompt)
+                if attachments:
+                    self.incoming.put({"content": prompt, "attachments": attachments})
+                    self.queued_count += 1
+                    self._append_user(prompt, attachments, queued=True)
+                    self.clear_attachments()
+                self._answer_question(prompt or "Please use the attached files.")
                 return
-            self.incoming.put(prompt)
+            self.incoming.put({"content": prompt, "attachments": attachments} if attachments else prompt)
             self.queued_count += 1
-            self._append("YOU · QUEUED\n", "user_role")
-            self._append(prompt + "\n\n")
+            self._append_user(prompt, attachments, queued=True)
+            self.clear_attachments()
             self.status_label.configure(text="Message queued. Your agent will read it before its next step.")
             return
         if not self.history:
             self.transcript.configure(state="normal")
             self.transcript.delete("1.0", "end")
             self.transcript.configure(state="disabled")
-        self._append("YOU\n", "user_role")
-        self._append(prompt + "\n\n")
+        self._append_user(prompt, attachments)
         self.input.delete("1.0", "end")
-        self._start_run(prompt)
+        self.clear_attachments()
+        if attachments:
+            self._start_run(prompt, attachments=attachments)
+        else:
+            self._start_run(prompt)
 
-    def _start_run(self, prompt, *, continuation=False):
+    def _start_run(self, prompt, *, attachments=None, continuation=False):
         self.cancel = threading.Event()
         self.run_id += 1
         run_id = self.run_id
@@ -1105,6 +1136,7 @@ class LocalAgentApp:
         model = self.model_var.get().strip()
         think = bool(self.think_var.get()) and self.model_thinking_support is not False
         performance_profile = self._selected_profile()
+        vision_supported = self.model_vision_support
         workspace = str(self.workspace)
         base_url = self.base_url
         cancel = self.cancel
@@ -1154,10 +1186,10 @@ class LocalAgentApp:
                 from agent_core import Agent
                 agent = Agent(workspace, emit, approve, cancel, model=model, base_url=base_url,
                               ask_user=ask_user, poll_messages=poll_messages, think=think,
-                              performance_profile=performance_profile)
+                              performance_profile=performance_profile, vision_supported=vision_supported)
                 self.agent = agent
                 agent.history = history
-                agent.run(prompt)
+                agent.run(prompt, attachments=attachments)
                 final_history = agent.history
             except Exception as exc:
                 emit("error", {"text": str(exc)})
@@ -1340,7 +1372,25 @@ class LocalAgentApp:
     def _handle_event(self, event, payload, run_id):
         if run_id is not None and run_id != self.run_id:
             return
-        if event == "connected":
+        if event == "attachments_prepared":
+            if payload.get("epoch") != self.attachment_epoch:
+                return
+            self.attachment_jobs = max(0, self.attachment_jobs - 1)
+            self._add_attachments(payload.get("items", []))
+            if payload.get("paste"):
+                try:
+                    self.input.delete("sel.first", "sel.last")
+                except tk.TclError:
+                    pass
+                self.input.insert("insert", payload["paste"])
+            errors = payload.get("errors", [])
+            for error in errors:
+                self._append(str(error) + "\n", "error")
+            self.status_label.configure(text="Could not attach some files. See the message in chat." if errors
+                                        else f"{len(self.pending_attachments)} attachment(s) ready to send." if self.pending_attachments
+                                        else "Text pasted. Ready to send.")
+            self._update_model_controls()
+        elif event == "connected":
             self.connecting = False
             self.base_url = payload["base_url"]
             models = payload["models"]
@@ -1357,6 +1407,8 @@ class LocalAgentApp:
                 self.model_var.set(DEFAULT_MODEL if DEFAULT_MODEL in models else models[0])
             self.model_info_name = ""
             self.model_tool_support = self.model_thinking_support = self.model_context_support = None
+            self.model_vision_support = None
+            self.model_context_tokens = None
             self.model_checking = False
             self.model_check_serial += 1
             self.engine_label.configure(text="●  Local engine ready" if models else "●  No local models installed",
@@ -1411,7 +1463,9 @@ class LocalAgentApp:
             known = info.get("capabilities_known", bool(capabilities)) and isinstance(capabilities, list)
             self.model_tool_support = "tools" in capabilities if known else None
             self.model_thinking_support = "thinking" in capabilities if known else None
+            self.model_vision_support = "vision" in capabilities if known else None
             context = info.get("context_length")
+            self.model_context_tokens = context if isinstance(context, int) and context > 0 else None
             self.model_context_support = context >= 8192 if isinstance(context, int) and context > 0 else None
             if self.model_thinking_support is False:
                 self.think_var.set(False)
@@ -1428,6 +1482,7 @@ class LocalAgentApp:
                     description += " · Reason more supported"
                 if isinstance(context, int) and context > 0:
                     description += f" · Up to {min(16384, context):,} context tokens"
+                description += " · Reads images" if self.model_vision_support else " · Text only" if self.model_vision_support is False else ""
             self.model_capability_label.configure(text=description, fg=COLORS["error"] if problem else COLORS["muted"])
             if problem or self.model_tool_support is None:
                 self.status_label.configure(text=description)
@@ -1531,7 +1586,14 @@ class LocalAgentApp:
             self.queued_count = 0
             if pending and not self.cancel.is_set() and not self.closing:
                 self._save_state()
-                self._start_run("\n\n".join(pending), continuation=True)
+                first, *remaining = pending
+                for message in remaining:
+                    self.incoming.put(message)
+                self.queued_count = len(remaining)
+                if isinstance(first, dict):
+                    self._start_run(str(first.get("content", "")), attachments=first.get("attachments"), continuation=True)
+                else:
+                    self._start_run(first, continuation=True)
                 return
             if self.work_started is not None:
                 self.elapsed_seconds = time.monotonic() - self.work_started
