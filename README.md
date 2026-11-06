@@ -14,11 +14,21 @@ The agent can inspect files, make edits, search a project, and run approved Powe
 
 The working timer shows elapsed time. Token speed is the actual generation rate reported by Ollama for the latest completed model step. Reason more enables the model's extra reasoning mode and can take longer. Plans show progress for larger tasks.
 
+New installations enable Reason more by default; an explicit saved choice is preserved, and models without thinking support disable it. Qwen3.5 reasoning uses its published precise-coding sampling settings. Earlier internal reasoning stays in the saved chat but is omitted from later Qwen3.5 model requests. If a reply reaches its output limit, incomplete actions are kept as non-executable drafts. The agent attempts one smaller action without extra reasoning, then pauses if it reaches the limit again.
+
 Attach files beside the message box, or paste an image or copied files with Ctrl+V. Ordinary text paste still works; right-click menus provide copy and paste. Attached files are copied into private local storage, so saved chats can still use them after the original moves. Remove a pending attachment before sending if it is not needed. Attachments can accompany follow-up messages while the agent works.
 
 Supported inputs are UTF-8/UTF-16 text and code, CSV, JSON, Markdown, DOCX text, and PNG/JPEG/GIF/BMP images. Each file can be up to 25 MB; a message can contain eight attachments and up to four images at 16K context, or one image at 8K. Images require a vision-capable model. Large text files start with an excerpt; the agent can read additional exact sections. DOCX layout and embedded images are not extracted, animated images use one frame, and PDF/binary formats show an explanation instead of pretending to read them. Images are resized for local inference. Image generation is not included.
 
 For coding, the agent is instructed to inspect the relevant files, make focused edits, and check the result. Its exact-text edit tool rejects ambiguous matches, and existing-file writes require a current read so stale assumptions do not overwrite newer file changes. File reads use bounded pages, and memory compaction preserves the latest tool result and recent failure details. The agent uses Windows PowerShell 5.1 syntax and can launch a tested Python desktop app without keeping a terminal command open until the window closes. Launching reports a process and startup log; it does not prove the whole app works. These checks reduce avoidable mistakes but do not make a small model equivalent to a larger model.
+
+A multiword project search with no literal matches can return ranked local code and document excerpts. Retrieval uses keywords and bounded scans, needs no extra model or network, and can miss relevant files. Excerpts are untrusted reference material; the agent must still read the current file before editing it.
+
+## Development evaluation and training preparation
+
+The development-only coding_benchmark.py runner checks three synthetic repair tasks against fixed external tests in disposable folders. It records actual task outcomes, model settings and source fingerprints under private data storage. A small benchmark is not a general intelligence score.
+
+The development-only prepare_training.py script verifies synthetic before-and-after repair examples and prepares a separate training pilot and notebook under private data/training. It does not train a model, collect personal chats, upload files or install training packages. The pilot is marked NOT_TRAINED. Its related validation examples do not demonstrate generalization. The current Qwen3.5 4B training recipe requires a supported GPU with at least 10 GiB VRAM. Training results must pass separate coding, tool and image checks before deployment; the existing quantized model and its vision projector remain available.
 
 The default model is Qwen3.5 4B with a 16,384-token active context. When working memory becomes full, the app condenses older steps into notes and continues. The full chat stays saved locally, and the agent can retrieve earlier details when needed. Summaries are not unlimited memory and can omit details; project files remain available to reread. A small local model may need corrections and does not guarantee the reasoning quality of larger hosted models.
 
