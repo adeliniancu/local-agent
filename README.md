@@ -10,11 +10,19 @@ Choose a project folder and describe a task. Enter sends a message; Shift+Enter 
 
 ## Working with the agent
 
-The agent can inspect files, make edits, search a project, and run approved PowerShell commands. Commands run with your Windows user permissions. File-tool overwrites keep local backups. Structured questions offer choices and a custom answer when the agent needs important missing information.
+The agent can inspect files, make edits, search a project, and run approved PowerShell commands. Commands run with your Windows user permissions. File-tool overwrites keep local backups. Questions and command approvals appear inside the chat. Questions offer choices and a custom answer. Command cards offer Allow once and Reject; the visible Always allow commands in this chat checkbox controls repeated approvals for the current chat.
 
 The working timer shows elapsed time. Token speed is the actual generation rate reported by Ollama for the latest completed model step. Reason more enables the model's extra reasoning mode and can take longer. Plans show progress for larger tasks.
 
 The default model is Qwen3.5 4B with a 16,384-token active context. When working memory becomes full, the app condenses older steps into notes and continues. The full chat stays saved locally, and the agent can retrieve earlier details when needed. Summaries are not unlimited memory and can omit details; project files remain available to reread. A small local model may need corrections and does not guarantee the reasoning quality of larger hosted models.
+
+Productive tasks continue automatically beyond 24 model steps. Repeated work without new progress triggers a normal pause. A longer task budget also provides a stopping point while preserving completed work and chat history; another message can continue the task.
+
+## Models and performance
+
+The inline model and performance controls offer Auto, RTX 5060 desktop, RTX 4070 laptop, RTX 5080 desktop, and CPU profiles. GPU allocation uses detected hardware, available memory, and the selected model. The default active context remains 16,384 tokens. Profiles do not change GPU firmware or power settings, and token speed always shows measured performance.
+
+Download another local Ollama model by name, or import a local GGUF file with a chosen model name. Downloads and imports start only when requested. Models need tool support for file and command tasks; the app checks advertised capabilities before starting that work. Larger models need more memory and can run more slowly, even on a faster GPU.
 
 ## Python projects
 
