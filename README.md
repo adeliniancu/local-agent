@@ -14,7 +14,7 @@ The agent can inspect files, make edits, search a project, and run approved Powe
 
 The working timer shows elapsed time. Token speed is the actual generation rate reported by Ollama for the latest completed model step. Reason more enables the model's extra reasoning mode and can take longer. Plans show progress for larger tasks.
 
-New installations enable Reason more by default; an explicit saved choice is preserved, and models without thinking support disable it. Qwen3.5 reasoning uses its published precise-coding sampling settings. Earlier internal reasoning stays in the saved chat but is omitted from later Qwen3.5 model requests. If a reply reaches its output limit, incomplete actions are kept as non-executable drafts. The agent attempts one smaller action without extra reasoning, then pauses if it reaches the limit again.
+Reason more remains optional; an explicit saved choice is preserved, and models without thinking support disable it. Qwen3.5 reasoning uses its published precise-coding sampling settings. Earlier internal reasoning stays in the saved chat but is omitted from later Qwen3.5 model requests. If a reply reaches its output limit, incomplete actions are kept as non-executable drafts. The agent attempts one smaller action without extra reasoning, then pauses if it reaches the limit again.
 
 Attach files beside the message box, or paste an image or copied files with Ctrl+V. Ordinary text paste still works; right-click menus provide copy and paste. Attached files are copied into private local storage, so saved chats can still use them after the original moves. Remove a pending attachment before sending if it is not needed. Attachments can accompany follow-up messages while the agent works.
 

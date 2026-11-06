@@ -67,7 +67,7 @@ class LocalAgentApp:
         self.work_started: float | None = None
         self.elapsed_seconds = 0.0
         self.last_tokens_per_second: float | None = None
-        self.reason_more = True
+        self.reason_more = False
         self.performance_profile = "auto"
         self.settings_expanded = False
         self.available_models: list[str] | None = None
@@ -978,7 +978,7 @@ class LocalAgentApp:
             if isinstance(history, list) and all(isinstance(m, dict) for m in history):
                 self.history = history
             self.model_name = str(saved.get("model") or DEFAULT_MODEL)
-            self.reason_more = bool(saved.get("reason_more", True))
+            self.reason_more = bool(saved.get("reason_more", False))
             profile = saved.get("performance_profile", "auto")
             self.performance_profile = profile if isinstance(profile, str) and profile in PROFILE_LABELS else "auto"
             if self.history:
