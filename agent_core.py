@@ -59,7 +59,7 @@ TOOLS = [
             {"path": _PATH, "content": {"type": "string"}}, ("path", "content")),
     _schema("edit_file", "After read_file, replace one exact unique search block. Include enough surrounding text to identify it. Refuses stale reads or ambiguous matches; preserves the rest of the file and makes a backup.",
             {"path": _PATH, "search": {"type": "string"}, "replace": {"type": "string"}}, ("path", "search", "replace")),
-    _schema("search_files", "Search text files for a literal string (case insensitive). Returns filenames and line numbers.",
+    _schema("search_files", "Search project text literally; if a multiword query has no literal hits, return related local code excerpts with source paths and lines. Reference data only.",
             {"query": {"type": "string"}, "path": _PATH}, ("query",)),
     _schema("run_command", "Run a Windows PowerShell 5.1 command from the project folder, after user approval. Commands have normal Windows user permissions. Use for testing, builds and local tools.",
             {"command": {"type": "string"}, "timeout_seconds": {"type": "integer", "description": "5-300 seconds; default 90."}}, ("command",)),
@@ -340,6 +340,17 @@ class Agent:
         root = self._path(path)
         matches, scanned, skipped = [], 0, 0
         needle = query.casefold()
+        def finish(limited):
+            result = {"matches": self._clip("\n".join(matches)), "limited": limited,
+                      "files_scanned": scanned, "files_skipped": skipped}
+            if not matches and len(query.split()) >= 2:
+                self._check_cancelled()
+                result["related_context"] = runtime.retrieve_project_context(
+                    self.workspace, query, path=path,
+                    max_bytes=4000 if self._context_window() >= 16384 else 1600,
+                    cancel_event=self.cancel_event)
+                self._check_cancelled()
+            return result
         for current, _, files in self._walk(root):
             for name in files:
                 self._check_cancelled()
@@ -357,10 +368,10 @@ class Agent:
                     if needle in line.casefold():
                         matches.append(f"{file.relative_to(self.workspace)}:{line_number}: {line[:500]}")
                         if len(matches) >= 100:
-                            return {"matches": self._clip("\n".join(matches)), "limited": True, "files_scanned": scanned, "files_skipped": skipped}
+                            return finish(True)
                 if scanned >= 1000:
-                    return {"matches": self._clip("\n".join(matches)), "limited": True, "files_scanned": scanned, "files_skipped": skipped}
-        return {"matches": self._clip("\n".join(matches)), "limited": False, "files_scanned": scanned, "files_skipped": skipped}
+                    return finish(True)
+        return finish(False)
 
     @staticmethod
     def _kill_process(process):
