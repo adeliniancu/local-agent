@@ -56,10 +56,10 @@ TOOLS = [
             {"path": _PATH, "max_depth": {"type": "integer", "description": "Depth 1-5; default 2."}}),
     _schema("read_file", "Read a UTF-8 text file in the project. Returns text and truncation notice if large.",
             {"path": _PATH}, ("path",)),
-    _schema("write_file", "Create or overwrite a UTF-8 text file. Existing content is backed up automatically.",
+    _schema("write_file", "Create a UTF-8 file, or deliberately replace an existing file after a complete read_file. Refuses stale reads. Prefer edit_file for focused changes; existing content is backed up.",
             {"path": _PATH, "content": {"type": "string"}}, ("path", "content")),
-    _schema("replace_text", "Replace one exact, unique text occurrence in a file. Read it first; existing content is backed up.",
-            {"path": _PATH, "old": {"type": "string"}, "new": {"type": "string"}}, ("path", "old", "new")),
+    _schema("edit_file", "After read_file, replace one exact unique search block. Include enough surrounding text to identify it. Refuses stale reads or ambiguous matches; preserves the rest of the file and makes a backup.",
+            {"path": _PATH, "search": {"type": "string"}, "replace": {"type": "string"}}, ("path", "search", "replace")),
     _schema("search_files", "Search text files for a literal string (case insensitive). Returns filenames and line numbers.",
             {"query": {"type": "string"}, "path": _PATH}, ("query",)),
     _schema("run_command", "Run a PowerShell command from the project folder, after user approval. Commands have normal Windows user permissions. Use for testing, builds and local tools.",
@@ -113,6 +113,7 @@ class Agent:
         self._unanswered = False
         self._stuck = False
         self._command_failures: dict[str, int] = {}
+        self._file_versions: dict[Path, dict] = {}
 
     def _check_cancelled(self):
         if self.cancel_event.is_set():
@@ -145,33 +146,92 @@ class Agent:
             raise ValueError("This appears to be a binary file.")
         return content
 
-    def _write(self, path: Path, content: str) -> dict:
+    def _read_file(self, path: Path) -> dict:
+        path = self._path(str(path))
+        if not path.is_file():
+            raise ValueError("File does not exist or is not a regular file. Use list_files to check its path.")
+        with path.open("rb") as handle:
+            raw = handle.read(MAX_FILE_BYTES + 1)
+        if len(raw) > MAX_FILE_BYTES:
+            raise ValueError("File exceeds the 1 MB text-file limit. Use a focused terminal command.")
+        text = raw.decode("utf-8-sig")
+        if "\x00" in text:
+            raise ValueError("This appears to be a binary file; read_file edits UTF-8 text only.")
+        text = text.replace("\r\n", "\n")
+        version = hashlib.sha256(raw).hexdigest()
+        truncated = len(text) > MAX_TOOL_OUTPUT
+        self._file_versions[path] = {"sha256": version, "complete": not truncated}
+        return {"path": str(path.relative_to(self.workspace)), "content": self._clip(text),
+                "truncated": truncated, "sha256": version}
+
+    def _require_current_read(self, path: Path, raw: bytes, *, complete=False):
+        observed = self._file_versions.get(path)
+        if observed is None:
+            raise ValueError("Read this existing file with read_file first, then use edit_file for a focused change or write_file for an intentional complete replacement.")
+        if observed["sha256"] != hashlib.sha256(raw).hexdigest():
+            raise ValueError("The file changed since your last read. No changes were written. Read it again and adapt the edit to the current content; do not overwrite the newer changes.")
+        if complete and not observed["complete"]:
+            raise ValueError("Your last read was truncated. Use edit_file for a targeted change so the unread remainder is preserved; write_file cannot replace this file from a partial read.")
+
+    def _edit_file(self, path: str, search: str, replace: str) -> dict:
+        target = self._path(path, writable=True)
+        if not isinstance(search, str) or not search or not isinstance(replace, str):
+            raise ValueError("search must be nonempty exact text and replace must be text.")
+        with target.open("rb") as handle:
+            raw = handle.read(MAX_FILE_BYTES + 1)
+        if len(raw) > MAX_FILE_BYTES:
+            raise ValueError("File exceeds the 1 MB edit limit. Use a focused terminal command.")
+        self._require_current_read(target, raw)
+        content = raw.decode("utf-8-sig")
+        # read_file displays normalized newlines. Match that block against CRLF
+        # when needed while keeping every untouched byte and the UTF-8 BOM.
+        matched, replacement = search, replace
+        if content.count(matched) == 0 and "\r\n" in content and "\r" not in search:
+            matched = search.replace("\n", "\r\n")
+            replacement = replace.replace("\r\n", "\n").replace("\n", "\r\n")
+        count = content.count(matched)
+        if count != 1:
+            detail = "No exact match was found" if count == 0 else f"The search block matches {count} places"
+            raise ValueError(f"{detail}. No changes were written. Read the relevant file and include a larger exact block of surrounding text that matches once.")
+        result = self._write(target, content.replace(matched, replacement, 1),
+                             allow_partial=True, preserve_bom=raw.startswith(b"\xef\xbb\xbf"))
+        result["replacements"] = 0 if result.get("unchanged") else 1
+        return result
+
+    def _write(self, path: Path, content: str, *, allow_partial=False, preserve_bom=False) -> dict:
         self._check_cancelled()
         path = self._path(str(path), writable=True)
         if not isinstance(content, str):
             raise ValueError("File content must be text.")
-        encoded = content.encode("utf-8")
+        encoded = (b"\xef\xbb\xbf" if preserve_bom else b"") + content.encode("utf-8")
         if len(encoded) > MAX_FILE_BYTES:
             raise ValueError("File content exceeds the 1 MB limit.")
         if path == self.workspace or path.is_dir():
             raise ValueError("Choose a file path, not a folder.")
         backup = None
+        original = None
+        complete_read = True
         if path.exists():
             if not path.is_file():
                 raise ValueError("Only regular files can be overwritten.")
             if path.stat().st_size > MAX_FILE_BYTES:
                 raise ValueError("Existing file is larger than 1 MB; use a focused edit.")
             with path.open("rb") as existing:
-                unchanged = existing.read(MAX_FILE_BYTES + 1) == encoded
-            if unchanged:
+                original = existing.read(MAX_FILE_BYTES + 1)
+            if original == encoded:
+                self._file_versions[path] = {"sha256": hashlib.sha256(encoded).hexdigest(), "complete": True}
                 return {"path": str(path.relative_to(self.workspace)), "bytes_written": 0,
                         "unchanged": True, "note": "The file already has this exact content."}
+            self._require_current_read(path, original, complete=not allow_partial)
+            complete_read = self._file_versions[path]["complete"] if allow_partial else True
             stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
             backup = self.workspace / BACKUP_DIR / stamp / path.relative_to(self.workspace)
             # Resolve again so an externally created backup symlink cannot redirect writes.
             backup = self._path(str(backup), writable=False)
             backup.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(path, backup)
+            backup.write_bytes(original)
+        elif path in self._file_versions:
+            raise ValueError("The file disappeared since your last read. No file was recreated. Inspect the project before deciding whether to create a replacement.")
         path.parent.mkdir(parents=True, exist_ok=True)
         self._check_cancelled()
         temp_name = None
@@ -179,11 +239,24 @@ class Agent:
             with tempfile.NamedTemporaryFile(dir=path.parent, prefix=".localagent-", delete=False) as handle:
                 temp_name = handle.name
                 handle.write(encoded)
+            self._path(str(path), writable=True)
+            if original is None:
+                if path.exists():
+                    raise ValueError("A file appeared at this path while preparing the write. Read it before overwriting it.")
+            else:
+                try:
+                    with path.open("rb") as current:
+                        latest = current.read(MAX_FILE_BYTES + 1)
+                except FileNotFoundError as exc:
+                    raise ValueError("The file disappeared while preparing the write. Nothing was overwritten.") from exc
+                if latest != original:
+                    raise ValueError("The file changed while preparing the write. Nothing was overwritten. Read it again before editing.")
             os.replace(temp_name, path)
         finally:
             if temp_name and os.path.exists(temp_name):
                 os.unlink(temp_name)
         result = {"path": str(path.relative_to(self.workspace)), "bytes_written": len(encoded)}
+        self._file_versions[path] = {"sha256": hashlib.sha256(encoded).hexdigest(), "complete": complete_read}
         if backup:
             result["backup"] = str(backup.relative_to(self.workspace))
         return result
@@ -456,21 +529,13 @@ class Agent:
             return self._list_files(**arguments)
         if name == "read_file":
             path = self._path(**arguments)
-            content = self._read(path)
-            return {"path": str(path.relative_to(self.workspace)), "content": self._clip(content),
-                    "truncated": len(content) > MAX_TOOL_OUTPUT}
+            return self._read_file(path)
         if name == "write_file":
             return self._write(self._path(arguments["path"], writable=True), arguments["content"])
         if name == "replace_text":
-            path = self._path(arguments["path"], writable=True)
-            old, new = arguments["old"], arguments["new"]
-            if not isinstance(old, str) or not old or not isinstance(new, str):
-                raise ValueError("old must be nonempty text and new must be text.")
-            content = self._read(path)
-            count = content.count(old)
-            if count != 1:
-                raise ValueError(f"Expected one exact occurrence, found {count}. Read the file and supply a unique larger snippet.")
-            return self._write(path, content.replace(old, new, 1))
+            return self._edit_file(arguments["path"], arguments["old"], arguments["new"])
+        if name == "edit_file":
+            return self._edit_file(**arguments)
         if name == "search_files":
             return self._search_files(**arguments)
         if name == "run_command":
@@ -494,7 +559,12 @@ class Agent:
             "inspect relevant files first, make focused changes, and verify results. Never claim a command "
             "ran or a file changed without a successful tool result. Explain errors honestly. "
             "For tasks with several substantial actions, use set_plan for a short plan and update it when progress changes. "
-            "Skip planning for simple tasks. Inspect before editing, run relevant checks after changes, and use failures to improve the result. "
+            "Use this coding workflow: read the relevant files and project instructions, make a short plan only for substantial work, "
+            "prefer edit_file for focused changes, then run relevant checks and inspect their actual results. "
+            "A stale-read error means someone changed the file: read it again and preserve their changes. "
+            "Reuse evidence already collected; do not repeatedly read unchanged files or rewrite whole files for a small edit. "
+            "Before your final reply, check the requested outcome against the file and command results. State what changed, "
+            "which checks actually ran and passed or failed, and any checks you could not run. Never label untested work verified. "
             "When a tool depends on another tool's result, wait for that result before choosing the next action. "
             "For Python dependencies use setup_python_environment, then python -m pip install and python from the same project .venv. "
             "Never install third-party packages into the app's runtime, Python Lib, or another interpreter's folders; never mix Python wheel versions. "
@@ -1015,7 +1085,7 @@ class Agent:
             return None
         stable = {key: value for key, value in result.items()
                   if key not in {"backup", "recovery_hint", "total_messages", "note"}}
-        if name in {"write_file", "replace_text"}:
+        if name in {"write_file", "replace_text", "edit_file"}:
             try:
                 path = self._path(arguments["path"])
                 with path.open("rb") as handle:

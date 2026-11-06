@@ -49,6 +49,7 @@ class CoreTests(unittest.TestCase):
         original = self.root / "nested" / "example.txt"
         original.parent.mkdir()
         original.write_bytes(b"old\r\ntext")
+        self.agent._execute("read_file", {"path": "nested/example.txt"})
         result = self.agent._execute("write_file", {"path": "nested/example.txt", "content": "new\ntext"})
         self.assertEqual(original.read_bytes(), b"new\ntext")
         backup = self.root / result["backup"]
@@ -82,6 +83,7 @@ class CoreTests(unittest.TestCase):
     def test_replace_requires_unique_exact_text(self):
         path = self.root / "example.txt"
         path.write_text("same same", encoding="utf-8")
+        self.agent._execute("read_file", {"path": "example.txt"})
         with self.assertRaises(ValueError):
             self.agent._execute("replace_text", {"path": "example.txt", "old": "same", "new": "other"})
         self.assertEqual(path.read_text(), "same same")
