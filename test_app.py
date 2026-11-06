@@ -540,6 +540,14 @@ class DesktopTests(unittest.TestCase):
                                   "paste": request["fallback_text"], "paste_marks": request["paste_marks"]}, None)
         self.assertEqual(self.ui.input.get("1.0", "end-1c"), "first second")
 
+    def test_oversized_selection_is_rejected_before_any_file_preparation(self):
+        self.ui._add_attachments([self.attachment()])
+        with patch("runtime.prepare_attachment") as prepare:
+            self.ui._prepare_attachments([str(self.data / f"file{index}.txt") for index in range(100)])
+            prepare.assert_not_called()
+        self.assertEqual(self.ui.attachment_jobs, 0)
+        self.assertIn("up to 7 more", self.ui.status_label.cget("text"))
+
     def test_unsupported_file_preparation_fails_inline_without_clearing_text(self):
         source = self.data / "paper.pdf"
         source.write_bytes(b"%PDF-test")

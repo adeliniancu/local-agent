@@ -415,6 +415,12 @@ class LocalAgentApp:
     def _prepare_attachments(self, paths=None, *, clipboard=False, fallback_text="", paste_marks=None):
         if self.closing:
             return
+        if not clipboard:
+            paths = list(paths or [])
+            available = max(0, 8 - len(self.pending_attachments))
+            if len(paths) > available:
+                self.status_label.configure(text=f"Choose up to {available} more file(s). A message holds at most 8 attachments.")
+                return
         epoch = self.attachment_epoch
         self.attachment_jobs += 1
         self.status_label.configure(text="Preparing attachments… Images, text/code, CSV, JSON, and DOCX are supported.")
