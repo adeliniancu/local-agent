@@ -91,6 +91,29 @@ class AttachmentCoreTests(unittest.TestCase):
         self.assertTrue(self.agent._records()[0]["_images_processed"])
         self.assertFalse([data for kind, data in self.events if kind == "error"])
 
+    def test_four_images_at_sixteen_k_survive_compaction(self):
+        requests = []
+        def chat():
+            requests.append(self.agent._messages(force_compact=True, aggressive=True))
+            return {"role": "assistant", "content": "All four references are red."}
+        self.agent._chat = chat
+        self.agent.run("Compare these references. " + "Context " * 8000, [dict(self.image, name=f"image-{i}.png") for i in range(4)])
+        self.assertEqual(sum(len(item.get("images", [])) for item in requests[0]), 4)
+        self.assertLessEqual(self.agent._request_size(requests[0]), 10000)
+        self.assertFalse([data for kind, data in self.events if kind == "error"])
+
+    def test_small_image_message_fits_normal_eight_k_budget(self):
+        self.options.return_value = {"num_ctx": 8192, "num_gpu": 0}
+        requests = []
+        def chat():
+            requests.append(self.agent._messages())
+            return {"role": "assistant", "content": "Red."}
+        self.agent._chat = chat
+        self.agent.run("What color is the reference?", [self.image])
+        self.assertLessEqual(self.agent._request_size(requests[0]), 11500)
+        self.assertEqual(sum(len(item.get("images", [])) for item in requests[0]), 1)
+        self.assertFalse([data for kind, data in self.events if kind == "error"])
+
     def test_unsupported_image_rejected_before_history_append(self):
         self.agent.vision_supported = False
         self.agent._chat = lambda: self.fail("No inference should run")
