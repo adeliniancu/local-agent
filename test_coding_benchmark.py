@@ -71,11 +71,12 @@ class CodingBenchmarkTests(unittest.TestCase):
     def test_core_fingerprint_matches_loaded_bytes_after_source_changes(self):
         source=self.root/'frozen_core.py'
         source.write_text('VALUE=1\n',encoding='utf-8')
+        original=source.read_bytes()
         loaded=benchmark.load_core(source)
         source.write_text('VALUE=2\n',encoding='utf-8')
         import hashlib
         self.assertEqual(loaded.VALUE,1)
-        self.assertEqual(loaded._benchmark_source_sha256,hashlib.sha256(b'VALUE=1\n').hexdigest())
+        self.assertEqual(loaded._benchmark_source_sha256,hashlib.sha256(original).hexdigest())
 
 
 if __name__=='__main__': unittest.main()
