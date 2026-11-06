@@ -96,6 +96,20 @@ class RepairMemoryTests(unittest.TestCase):
         self.assertTrue(second["already_running"])
         self.assertEqual(self.approve.call_count, 1)
 
+    def test_overlapping_reads_do_not_evade_loop_detection(self):
+        target = self.root / "main.py"
+        target.write_text("# example\n" * 1000)
+        def progress(start, size):
+            result = self.agent._read_file(target, start, size)
+            return self.agent._progress_signature("read_file", {"path": "main.py"}, result)
+        self.assertIsNotNone(progress(0, 4000))
+        for start in (100, 350, 500, 800, 950, 1050):
+            self.assertIsNone(progress(start, 150))
+        self.assertIsNotNone(progress(4000, 4000))
+        self.assertIsNone(progress(3800, 400))
+        target.write_text("# changed\n" * 1000)
+        self.assertIsNotNone(progress(0, 4000))
+
     def test_launch_reports_startup_failure_and_respects_denial(self):
         (self.root / "bad.py").write_text("raise RuntimeError('startup-broken')\n")
         self.approve.return_value = False

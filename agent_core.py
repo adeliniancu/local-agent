@@ -122,6 +122,7 @@ class Agent:
         self._command_failures: dict[str, int] = {}
         self._file_versions: dict[Path, dict] = {}
         self._launched_apps = {}
+        self._progress_reads = {}
 
     def _check_cancelled(self):
         if self.cancel_event.is_set():
@@ -1275,6 +1276,23 @@ class Agent:
                 or result.get("unchanged") or result.get("exit_code", 0) != 0
                 or name == "set_plan"):
             return None
+        if (name == "read_file" and isinstance(result.get("sha256"), str)
+                and type(result.get("start")) is int and type(result.get("end")) is int):
+            # Changing the page size/offset does not make already-read code new
+            # evidence. Otherwise a model can evade loop detection indefinitely
+            # by rereading the same function in ever smaller overlapping slices.
+            key = (result.get("path"), result["sha256"])
+            start, end = result["start"], result["end"]
+            ranges = self._progress_reads.setdefault(key, [])
+            if any(left <= start and right >= end for left, right in ranges):
+                return None
+            merged = []
+            for left, right in sorted(ranges + [(start, end)]):
+                if merged and left <= merged[-1][1]:
+                    merged[-1] = (merged[-1][0], max(right, merged[-1][1]))
+                else:
+                    merged.append((left, right))
+            self._progress_reads[key] = merged
         stable = {key: value for key, value in result.items()
                   if key not in {"backup", "recovery_hint", "total_messages", "note"}}
         if name in {"write_file", "replace_text", "edit_file"}:
@@ -1359,6 +1377,7 @@ class Agent:
         self._unanswered = False
         self._stuck = False
         self._command_failures.clear()
+        self._progress_reads.clear()
         self._inference_options_cache = None
         self._new_image_records = []
         self._request_image_record = None
