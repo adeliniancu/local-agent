@@ -103,7 +103,8 @@ class CoreTests(unittest.TestCase):
         (self.root / "big.txt").write_text("x" * (MAX_TOOL_OUTPUT + 30))
         result = self.agent._execute("read_file", {"path": "big.txt"})
         self.assertTrue(result["truncated"])
-        self.assertIn("truncated", result["content"])
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["next_start"], len(result["content"]))
 
     def test_denied_command_never_starts_process(self):
         self.agent.approve = lambda command, cwd: False
