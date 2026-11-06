@@ -39,6 +39,9 @@ def read_json(path):
 
 
 def member(root: Path, relative: str) -> Path:
+    # Normalize both sides before containment checks (Windows may expose the
+    # same directory through a short RUNNER~1 path or a relative path).
+    root = Path(root).resolve(strict=True)
     given = Path(relative)
     if given.is_absolute() or '..' in given.parts or ':' in relative:
         raise ValueError('Model member must be a relative path inside its folder')
