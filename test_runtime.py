@@ -74,6 +74,18 @@ class AllocationTests(unittest.TestCase):
                 with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "at least 8K"):
                     runtime.get_inference_options("small-model", profile)
 
+    def test_8k_custom_model_context_applies_to_cpu_and_environment_override(self):
+        info = {**QWEN_INFO, "context_length": 8192}
+        with patch.object(runtime, "get_model_info", return_value=info), \
+                patch.dict(os.environ, {"LOCAL_AGENT_GPU_LAYERS": "12"}):
+            self.assertEqual({"num_ctx": 8192, "num_gpu": 0}, runtime.get_inference_options("custom", "cpu"))
+            self.assertEqual({"num_ctx": 8192, "num_gpu": 12}, runtime.get_inference_options("custom", "auto"))
+
+    def test_cpu_cannot_bypass_remote_model_rejection(self):
+        with patch.object(runtime, "get_model_info", side_effect=ValueError("remote service")):
+            with self.assertRaisesRegex(ValueError, "remote service"):
+                runtime.get_inference_options("remote-alias", "cpu")
+
     def test_invalid_profile_is_rejected(self):
         with self.assertRaises(ValueError):
             runtime.get_inference_options(runtime.MODEL, "imaginary GPU")
