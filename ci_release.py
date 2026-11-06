@@ -81,6 +81,23 @@ def check_publication(repository: str, expected_sha: str, version: str, *, get=g
             return {"allowed": False, "reason": "This version or a newer version is already published."}
     tag = "v" + version
     existing = get(prefix + "/releases/tags/" + tag)
+    # GitHub's tag lookup can omit drafts until the tag is published. The
+    # authenticated release list includes our prepared, still-unpublished draft.
+    if existing is None:
+        for page in range(1, 21):
+            releases = get(prefix + f"/releases?per_page=100&page={page}") or []
+            if not isinstance(releases, list):
+                raise RuntimeError("GitHub returned an invalid release list.")
+            matching = [release for release in releases if release.get("tag_name") == tag]
+            if len(matching) > 1:
+                raise RuntimeError("Multiple releases use the expected tag; publication stopped.")
+            if matching:
+                existing = matching[0]
+                break
+            if len(releases) < 100:
+                break
+        else:
+            raise RuntimeError("The release history could not be fully checked.")
     if existing and not existing.get("draft"):
         return {"allowed": False, "reason": "The release is already published and will not be changed."}
     if existing and existing.get("target_commitish") != expected_sha:

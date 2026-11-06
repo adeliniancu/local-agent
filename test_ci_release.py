@@ -80,6 +80,24 @@ class AutomaticReleaseTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "another commit"):
             self.check()
 
+    def test_unpublished_draft_found_in_authenticated_release_list(self):
+        self.data[self.prefix + "/releases?per_page=100&page=1"] = [{
+            "tag_name": "v2.0.2", "draft": True, "target_commitish": self.sha,
+            "assets": [{"name": "app.zip", "size": 123, "state": "uploaded"}],
+        }]
+        result = self.check(assets={"app.zip": 123})
+        self.assertTrue(result["allowed"])
+        self.assertTrue(result["existing_draft"])
+
+    def test_draft_listing_is_paginated_and_preserves_commit_guard(self):
+        self.data[self.prefix + "/releases?per_page=100&page=1"] = [
+            {"tag_name": f"v1.0.{number}"} for number in range(100)]
+        self.data[self.prefix + "/releases?per_page=100&page=2"] = [{
+            "tag_name": "v2.0.2", "draft": True, "target_commitish": "b" * 40,
+        }]
+        with self.assertRaisesRegex(RuntimeError, "different source commit"):
+            self.check()
+
     def test_annotated_tag_resolves_to_tested_commit(self):
         self.data[self.prefix + "/git/ref/tags/v2.0.2"] = {"object": {"type": "tag", "sha": "c" * 40}}
         self.data[self.prefix + "/git/tags/" + "c" * 40] = {"object": {"type": "commit", "sha": self.sha}}
