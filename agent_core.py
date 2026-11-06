@@ -123,6 +123,7 @@ class Agent:
         self._file_versions: dict[Path, dict] = {}
         self._launched_apps = {}
         self._progress_reads = {}
+        self._response_recovery = False
 
     def _check_cancelled(self):
         if self.cancel_event.is_set():
@@ -750,6 +751,13 @@ class Agent:
                     text += "\nAGENTS.md is longer than this excerpt. Inspect the full file for requirements relevant to your changes."
         except (ValueError, OSError, UnicodeError):
             pass
+        if self._response_recovery:
+            text += ("\nRESPONSE-LIMIT RECOVERY: The previous response ended at its token limit. "
+                     "Its draft and tool calls were incomplete and NO actions from it were executed. "
+                     "Continue the current user task from the last completed tool result. "
+                     "Return one small complete next action, using a focused edit or a small file when coding. "
+                     "Avoid recaps, whole-project rewrites and repeating unchanged reads. "
+                     "Do not claim the task is finished without verification. Existing permissions still apply.")
         return text
 
     @staticmethod
@@ -806,6 +814,10 @@ class Agent:
 
     @staticmethod
     def _record_text(item):
+        if item.get("_response_truncated"):
+            return json.dumps({key: item[key] for key in
+                               ("content", "thinking", "_incomplete_tool_calls", "_response_truncated")
+                               if key in item}, ensure_ascii=False)
         if item.get("tool_calls"):
             return json.dumps({"content": item.get("content", ""), "tool_calls": item["tool_calls"]}, ensure_ascii=False)
         return str(item.get("content", ""))
@@ -901,6 +913,12 @@ class Agent:
         return len(json.dumps({"messages": text_messages, "tools": self._available_tools()}, ensure_ascii=False).encode("utf-8"))
 
     def _model_record(self, item):
+        if item.get("_response_truncated"):
+            # Raw drafts remain in saved history, but incomplete reasoning/code
+            # must not look like an executed action or verified answer on retry.
+            return {"role": "assistant", "content":
+                    "An earlier assistant response was cut off at its output limit. No tools from that response were executed. "
+                    "The incomplete draft is saved in read_working_history; continue from the last completed result."}
         if not item.get("attachments"):
             return {key: value for key, value in item.items() if key in {"role", "content", "tool_calls", "tool_name", "thinking"}}
         result = runtime.model_message(item, vision_supported=bool(self.vision_supported), include_images=False)
@@ -1155,7 +1173,7 @@ class Agent:
         transport_sockets = []
         available_tools = self._available_tools()
         payload = json.dumps({"model": self.model, "messages": messages, "tools": available_tools,
-                              "stream": True, "think": self.think, "keep_alive": "2m",
+                              "stream": True, "think": self.think and not self._response_recovery, "keep_alive": "2m",
                               "options": {**inference_options, "num_predict": min(4096, self._context_window() // 4),
                                           "temperature": 0.2}}).encode("utf-8")
 
@@ -1194,6 +1212,7 @@ class Agent:
         thread.start()
         content, thinking, calls, indexed = [], [], [], {}
         complete = False
+        truncated = False
         try:
             while True:
                 self._check_cancelled()
@@ -1238,7 +1257,14 @@ class Agent:
                     complete = True
                     self._emit_metrics(item)
                     if item.get("done_reason") == "length":
-                        raise RuntimeError("The model reached its response limit before finishing. Try a smaller task.")
+                        truncated = True
+            if truncated:
+                # Never parse or execute a response cut off at the generation
+                # limit, even if a prefix happens to form valid JSON.
+                return {"role": "assistant", "_response_truncated": True,
+                        "content": "Response stopped at its output limit. No actions from this incomplete response were executed.\n\nIncomplete draft:\n" + "".join(content),
+                        **({"thinking": "".join(thinking)} if thinking else {}),
+                        **({"_incomplete_tool_calls": calls} if calls else {})}
             for call in calls:
                 function = call["function"]
                 arguments = function.get("arguments", {})
@@ -1387,6 +1413,8 @@ class Agent:
         self._inference_options_cache = None
         self._new_image_records = []
         self._request_image_record = None
+        self._response_recovery = False
+        response_recoveries = 0
         seen_progress: set[str] = set()
         idle_tools = 0
         pause_reason = None
@@ -1409,6 +1437,19 @@ class Agent:
                 self.emit("status", {"text": "Thinking locally…" if step == 0 else "Checking the results…"})
                 message = self._chat()
                 self._mark_images_processed()
+                if message.get("_response_truncated"):
+                    self.history.append(message)
+                    self.emit("stream_reset", {"text": "The model response reached its limit; no incomplete actions were executed."})
+                    if response_recoveries:
+                        self._pause("Paused because the model reached its response limit again after one smaller-action recovery.")
+                        return
+                    response_recoveries += 1
+                    self._response_recovery = True
+                    text = "Response limit reached. Trying one smaller complete action without extra reasoning; your reasoning preference stays unchanged."
+                    self.emit("status", {"text": text})
+                    self.emit("assistant", {"text": text})
+                    continue
+                self._response_recovery = False
                 message = self._normalize_tool_message(message)
                 self.history.append(message)
                 if message.get("content"):
@@ -1486,4 +1527,5 @@ class Agent:
         except Exception as exc:
             self.emit("error", {"text": f"{type(exc).__name__}: {exc}"})
         finally:
+            self._response_recovery = False
             self.emit("done", {})
