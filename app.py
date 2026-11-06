@@ -403,7 +403,7 @@ class LocalAgentApp:
         if paths:
             self._prepare_attachments(list(paths))
 
-    def _prepare_attachments(self, paths=None, *, clipboard=False, fallback_text=""):
+    def _prepare_attachments(self, paths=None, *, clipboard=False, fallback_text="", paste_marks=None):
         if self.closing:
             return
         epoch = self.attachment_epoch
@@ -426,7 +426,8 @@ class LocalAgentApp:
             except Exception as exc:
                 errors.append(str(exc))
             self.events.put(("attachments_prepared", {"epoch": epoch, "items": items, "errors": errors,
-                             "paste": fallback_text if clipboard and not items and not errors else ""}, None))
+                             "paste": fallback_text if clipboard and not items and not errors else "",
+                             "paste_marks": paste_marks}, None))
         threading.Thread(target=worker, daemon=True).start()
 
     def _paste_input(self, _event=None):
@@ -436,7 +437,19 @@ class LocalAgentApp:
             plain_text = self.root.clipboard_get()
         except tk.TclError:
             plain_text = ""
-        self._prepare_attachments(clipboard=True, fallback_text=plain_text)
+        prefix = f"attachment_paste_{time.monotonic_ns()}"
+        marks = {"insert": prefix}
+        self.input.mark_set(prefix, "insert")
+        self.input.mark_gravity(prefix, "left")
+        try:
+            for key, index in (("start", "sel.first"), ("end", "sel.last")):
+                marks[key] = prefix + "_" + key
+                self.input.mark_set(marks[key], index)
+                self.input.mark_gravity(marks[key], "left")
+        except tk.TclError:
+            marks.pop("start", None)
+            marks.pop("end", None)
+        self._prepare_attachments(clipboard=True, fallback_text=plain_text, paste_marks=marks)
         return "break"
 
     def _add_attachments(self, items):
@@ -460,6 +473,9 @@ class LocalAgentApp:
         self.pending_attachments = []
         self.attachment_epoch += 1
         self.attachment_jobs = 0
+        for mark in self.input.mark_names():
+            if mark.startswith("attachment_paste_"):
+                self.input.mark_unset(mark)
         self._render_pending_attachments()
         self._update_model_controls()
 
@@ -1377,12 +1393,14 @@ class LocalAgentApp:
                 return
             self.attachment_jobs = max(0, self.attachment_jobs - 1)
             self._add_attachments(payload.get("items", []))
+            marks = payload.get("paste_marks") or {}
             if payload.get("paste"):
-                try:
-                    self.input.delete("sel.first", "sel.last")
-                except tk.TclError:
-                    pass
-                self.input.insert("insert", payload["paste"])
+                if marks.get("start") and marks.get("end"):
+                    self.input.delete(marks["start"], marks["end"])
+                destination = marks.get("insert", "insert")
+                self.input.insert(destination, payload["paste"])
+            for mark in marks.values():
+                self.input.mark_unset(mark)
             errors = payload.get("errors", [])
             for error in errors:
                 self._append(str(error) + "\n", "error")
