@@ -810,19 +810,40 @@ class Agent:
                     raise RuntimeError("The local model still rejected the reduced context after one retry. Your full chat and completed changes are saved; no completed tools were replayed. Try a more focused instruction or a model with a larger context window.") from retry_error
                 raise
 
+    def _inference_options(self) -> dict:
+        if self._inference_options_cache is not None:
+            return self._inference_options_cache
+        inbox = queue.Queue()
+        def resolve():
+            try:
+                inbox.put((runtime.get_inference_options(self.model, self.performance_profile), None))
+            except Exception as exc:
+                inbox.put((None, exc))
+        threading.Thread(target=resolve, daemon=True, name="local-agent-hardware").start()
+        while True:
+            self._check_cancelled()
+            try:
+                options, error = inbox.get(timeout=0.1)
+            except queue.Empty:
+                continue
+            self._check_cancelled()
+            if error is not None:
+                raise error
+            self._inference_options_cache = dict(options)
+            return self._inference_options_cache
+
     def _chat_once(self) -> dict:
         """Read Ollama NDJSON on a worker so Stop can interrupt a quiet model."""
+        inference_options = self._inference_options()
         messages = self._messages()
         parsed = urlsplit(self.base_url)
         connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=600)
         inbox = queue.Queue()
         transport_sockets = []
-        if self._inference_options_cache is None:
-            self._inference_options_cache = runtime.get_inference_options(self.model, self.performance_profile)
         available_tools = self._available_tools()
         payload = json.dumps({"model": self.model, "messages": messages, "tools": available_tools,
                               "stream": True, "think": self.think, "keep_alive": "2m",
-                              "options": {**self._inference_options_cache, "num_predict": 4096,
+                              "options": {**inference_options, "num_predict": 4096,
                                           "temperature": 0.2}}).encode("utf-8")
 
         def fetch():

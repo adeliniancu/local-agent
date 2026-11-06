@@ -398,6 +398,27 @@ class StreamTests(unittest.TestCase):
         self.assertEqual(self.resolve_options.call_count, 2)
         self.resolve_options.assert_called_with("custom-local:4b", "rtx4070_laptop")
 
+    def test_stop_during_hardware_resolution_returns_promptly(self):
+        release = threading.Event()
+        self.resolve_options.side_effect = lambda *_: release.wait(5) or {"num_ctx": 16384, "num_gpu": 0}
+        with tempfile.TemporaryDirectory() as workspace:
+            cancel = threading.Event()
+            events = []
+            agent = Agent(workspace, lambda kind, data: events.append((kind, data)), lambda *_: True, cancel)
+            timer = threading.Timer(0.2, cancel.set)
+            timer.start()
+            started = time.monotonic()
+            try:
+                with patch("agent_core.http.client.HTTPConnection") as connection:
+                    agent.run("Inspect my project")
+                connection.assert_not_called()
+            finally:
+                timer.cancel()
+                release.set()
+            self.assertLess(time.monotonic() - started, 1.5)
+            self.assertEqual(events[-1][0], "done")
+            self.assertFalse(any(kind == "error" for kind, _ in events))
+
     def test_stop_during_silent_inference_returns_promptly(self):
         release = threading.Event()
         def respond(handler):
