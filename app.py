@@ -26,8 +26,7 @@ PROFILE_LABELS = {
 }
 CODING_MODELS = {
     "Fast / smaller · Qwen 3.5 4B": (DEFAULT_MODEL, "About 3.3 GB. The default for this app."),
-    "Quality trial · Qwen 3.5 9B": ("qwen3.5:9b", "About 6.6 GB. May be slower or use system RAM on an 8 GB GPU."),
-    "Advanced · Qwen3 Coder 30B": ("qwen3-coder:30b", "About 19 GB. For 16 GB+ GPUs with enough system RAM; not an 8 GB GPU default."),
+    "Larger model · Qwen 3.5 9B": ("qwen3.5:9b-q4_K_M", "About 6.6 GB. May be slower or use system RAM on an 8 GB GPU."),
 }
 try:
     from version import __version__ as APP_VERSION
@@ -380,6 +379,179 @@ class LocalAgentApp:
         self.transcript.insert("end", text, tag)
         self.transcript.configure(state="disabled")
         self.transcript.see("end")
+
+    def _text_menu(self, event, widget, *, editable=False):
+        menu = tk.Menu(self.root, tearoff=False)
+        menu.add_command(label="Copy", command=lambda: widget.event_generate("<<Copy>>"))
+        if editable:
+            menu.add_command(label="Cut", command=lambda: widget.event_generate("<<Cut>>"))
+            menu.add_command(label="Paste", command=self._paste_input)
+        menu.add_separator()
+        menu.add_command(label="Select all", command=lambda: widget.tag_add("sel", "1.0", "end-1c"))
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+        return "break"
+
+    def attach_files(self):
+        if self.closing or self.updating:
+            return
+        paths = filedialog.askopenfilenames(parent=self.root, title="Attach files to your message",
+            filetypes=[("Images, text, code, and Word documents", "*.png *.jpg *.jpeg *.gif *.bmp *.txt *.md *.csv *.json *.py *.js *.ts *.html *.css *.docx"),
+                       ("All files", "*.*")])
+        if paths:
+            self._prepare_attachments(list(paths))
+
+    def _prepare_attachments(self, paths=None, *, clipboard=False, fallback_text=""):
+        if self.closing:
+            return
+        epoch = self.attachment_epoch
+        self.attachment_jobs += 1
+        self.status_label.configure(text="Preparing attachments… Images, text/code, CSV, JSON, and DOCX are supported.")
+        self._update_model_controls()
+
+        def worker():
+            items, errors = [], []
+            try:
+                import runtime
+                if clipboard:
+                    items = runtime.clipboard_attachments()
+                else:
+                    for path in paths or []:
+                        try:
+                            items.append(runtime.prepare_attachment(path))
+                        except Exception as exc:
+                            errors.append(f"{Path(path).name}: {exc}")
+            except Exception as exc:
+                errors.append(str(exc))
+            self.events.put(("attachments_prepared", {"epoch": epoch, "items": items, "errors": errors,
+                             "paste": fallback_text if clipboard and not items and not errors else ""}, None))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _paste_input(self, _event=None):
+        if self.closing or self.updating:
+            return "break"
+        try:
+            plain_text = self.root.clipboard_get()
+        except tk.TclError:
+            plain_text = ""
+        self._prepare_attachments(clipboard=True, fallback_text=plain_text)
+        return "break"
+
+    def _add_attachments(self, items):
+        for item in items:
+            if not isinstance(item, dict) or not item.get("id"):
+                continue
+            if any(existing.get("id") == item["id"] for existing in self.pending_attachments):
+                continue
+            if len(self.pending_attachments) >= 8:
+                self._append("A message can contain up to 8 attachments. Send these first, then attach more.\n", "error")
+                break
+            if item.get("kind") == "image" and sum(entry.get("kind") == "image" for entry in self.pending_attachments) >= 4:
+                self._append("A message can contain up to 4 images. Send these first, then attach more.\n", "error")
+                continue
+            self.pending_attachments.append(copy.deepcopy(item))
+            if item.get("warning"):
+                self._append(str(item["warning"]) + "\n", "muted")
+        self._render_pending_attachments()
+
+    def clear_attachments(self):
+        self.pending_attachments = []
+        self.attachment_epoch += 1
+        self.attachment_jobs = 0
+        self._render_pending_attachments()
+        self._update_model_controls()
+
+    def _remove_attachment(self, attachment_id):
+        self.pending_attachments = [item for item in self.pending_attachments if item.get("id") != attachment_id]
+        self._render_pending_attachments()
+
+    def _attachment_photo(self, item, *, width=220, height=150):
+        if item.get("kind") != "image":
+            return None
+        try:
+            import runtime
+            path = runtime.resolve_attachment_path(item, preview=True)
+            photo = tk.PhotoImage(file=str(path))
+            return photo.subsample(max(1, math.ceil(max(photo.width() / width, photo.height() / height))))
+        except (OSError, ValueError, KeyError, AttributeError, tk.TclError):
+            return None
+
+    def _render_pending_attachments(self):
+        for child in self.pending_chips.winfo_children():
+            child.destroy()
+        self.pending_previews = []
+        if not self.pending_attachments:
+            self.pending_frame.pack_forget()
+            return
+        self.pending_frame.pack(fill="x", padx=12, pady=(0, 5), before=self.always_allow_box)
+        for item in self.pending_attachments:
+            chip = tk.Frame(self.pending_chips, bg=COLORS["border"], padx=5, pady=3)
+            chip.pack(side="left", padx=(0, 5))
+            photo = self._attachment_photo(item, width=28, height=28)
+            if photo:
+                self.pending_previews.append(photo)
+                tk.Label(chip, image=photo, bg=COLORS["border"]).pack(side="left", padx=(0, 5))
+            name = str(item.get("name", "Attachment"))
+            self._label(chip, name if len(name) < 25 else name[:22] + "…", size=8).pack(side="left")
+            button = self._button(chip, "×", lambda key=item["id"]: self._remove_attachment(key))
+            button.configure(pady=0, padx=5, font=("Segoe UI", 10))
+            button.pack(side="left", padx=(3, 0))
+        self.pending_canvas.xview_moveto(0)
+
+    def _open_attachment(self, item):
+        try:
+            import runtime
+            path = runtime.resolve_attachment_path(item)
+            if item.get("kind") == "image":
+                os.startfile(str(path))
+            elif item.get("kind") == "text":
+                notepad = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "notepad.exe"
+                subprocess.Popen([str(notepad), str(path)])
+            else:
+                explorer = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "explorer.exe"
+                subprocess.Popen([str(explorer), "/select,", str(path)])
+        except (OSError, ValueError, KeyError) as exc:
+            self.status_label.configure(text=f"Could not open attachment: {exc}")
+            self._append(f"Could not open attachment: {exc}\n", "error")
+
+    def _render_attachments(self, items):
+        if not items:
+            return
+        card = self._inline_card("Attachments")
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            row = tk.Frame(card, bg=COLORS["panel"])
+            row.pack(fill="x", pady=(0, 4))
+            label = str(item.get("name", "Attachment"))
+            self._label(row, label, size=9, wraplength=310, justify="left").pack(side="left")
+            action = "Open image" if item.get("kind") == "image" else "Open in Notepad" if item.get("kind") == "text" else "Show file"
+            button = self._button(row, action, lambda attachment=copy.deepcopy(item): self._open_attachment(attachment))
+            button.configure(padx=8, pady=4, font=("Segoe UI", 8))
+            button.pack(side="right", padx=(8, 0))
+            photo = self._attachment_photo(item)
+            if photo:
+                self.chat_previews.append(photo)
+                preview = tk.Label(card, image=photo, bg=COLORS["panel"], cursor="hand2")
+                preview.pack(anchor="w", pady=(0, 8))
+                preview.bind("<Button-1>", lambda _event, attachment=copy.deepcopy(item): self._open_attachment(attachment))
+        self._resize_inline_cards()
+
+    def _append_user(self, prompt, items, *, queued=False):
+        self._append("YOU · QUEUED\n" if queued else "YOU\n", "user_role")
+        if prompt:
+            self._append(prompt + "\n\n")
+        self._render_attachments(items)
+
+    def _coding_preset_changed(self, _event=None):
+        if self.busy or self.downloading or self.updating:
+            return
+        selected = CODING_MODELS.get(self.coding_preset_var.get())
+        if selected:
+            self.download_name_var.set(selected[0])
+            self.coding_preset_note.configure(text=selected[1] + " Click Download to add it.")
 
     def _inline_card(self, title):
         card = tk.Frame(self.transcript, bg=COLORS["panel"], highlightbackground=COLORS["border"],
