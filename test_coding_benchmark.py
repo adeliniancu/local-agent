@@ -54,6 +54,52 @@ class CodingBenchmarkTests(unittest.TestCase):
             with self.assertRaises(PermissionError): agent._run_command('python -c "print(1)"')
             validate.assert_not_called()
 
+    def test_equivalent_validation_commands_are_intercepted_without_shell_execution(self):
+        workspace,tests=benchmark.prepare_case('ledger',self.root/'with spaces')
+        app_root=self.root/'app with spaces'
+        interpreter=app_root/'runtime/python/python.exe'
+        import sys
+        commands=[
+            'python -m unittest', 'python.exe -m unittest -v',
+            'python -m unittest fixed_tests.py -q', 'python fixed_tests.py',
+            f'cd "{workspace}"; python -m unittest -q',
+            f'cd {workspace}; python -m unittest -q',
+            f"Set-Location -LiteralPath '{workspace}'; python.exe -m unittest -v",
+            f'"{sys.executable}" -m unittest -q',
+            f'& "{interpreter}" -m unittest -q',
+            f'{interpreter} -m unittest -q',
+        ]
+        agent=benchmark.evaluation_agent(agent_core,workspace,tests,lambda *_:None,threading.Event(),'fake',False)
+        with patch.object(agent_core,'APP_ROOT',app_root), patch.object(benchmark,'validate',return_value={'exit_code':0,'output':'passed'}) as validate:
+            with patch.object(benchmark.subprocess,'Popen') as shell:
+                for command in commands:
+                    with self.subTest(command=command):
+                        self.assertTrue(benchmark.is_validation_command(command,workspace,app_root=app_root))
+                        self.assertEqual(agent._run_command(command)['exit_code'],0)
+                shell.assert_not_called()
+            self.assertEqual(validate.call_count,len(commands))
+
+    def test_normalization_rejects_other_paths_expansions_and_commands(self):
+        workspace,tests=benchmark.prepare_case('ledger',self.root/'case')
+        commands=[
+            'python -c "print(1)"', 'python -m unittest --help',
+            'python -m unittest discover -s ..', 'python other_tests.py',
+            'python -m unittest -q; echo passed',
+            f'cd "{workspace}"; python -m unittest -q; echo passed',
+            f'cd "{self.root}"; python -m unittest -q',
+            f'cd "{workspace}" && python -m unittest -q',
+            'python -m unittest -q | Out-String', 'python -m unittest -q > result.txt',
+            '$python -m unittest -q', 'python -m unittest -q\necho passed',
+            '`python -m unittest -q', 'python -m unittest -q -v',
+            'python -m unittest fixed_tests.py fixed_tests.py',
+            str(self.root/'unapproved/python.exe')+' -m unittest -q',
+        ]
+        with patch.object(benchmark,'validate') as validate:
+            for command in commands:
+                with self.subTest(command=command):
+                    self.assertFalse(benchmark.is_validation_command(command,workspace))
+            validate.assert_not_called()
+
     def test_evaluation_code_cannot_write_outside_fixture(self):
         workspace,tests=benchmark.prepare_case('ledger',self.root/'case')
         outside=self.root/'outside.txt'
@@ -68,6 +114,9 @@ class CodingBenchmarkTests(unittest.TestCase):
             result=benchmark.evaluate('ledger',agent_core,self.root/'case',model='fake',think=False,max_steps=1,max_seconds=3)
         self.assertFalse(result['passed'])
         self.assertTrue(result['baseline_failed'])
+        self.assertEqual(result['harness_protocol'],benchmark.HARNESS_PROTOCOL)
+        self.assertEqual(result['harness_sha256'],benchmark.HARNESS_SOURCE_SHA256)
+        self.assertEqual(len(result['harness_sha256']),64)
 
     def test_limits_restore_even_on_exception(self):
         previous=(agent_core.MAX_RUN_STEPS,agent_core.MAX_RUN_SECONDS)

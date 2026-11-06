@@ -12,6 +12,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 import tempfile
@@ -20,6 +21,8 @@ import time
 
 ROOT = Path(__file__).resolve().parent
 VALIDATION_COMMAND = "python -m unittest -q"
+HARNESS_PROTOCOL = "coding-evaluation-v2"
+HARNESS_SOURCE_SHA256 = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
 
 CASES = {
     "ledger": {
@@ -246,6 +249,73 @@ def load_core(core_path: Path | None = None):
     return module
 
 
+def is_validation_command(command: str, workspace: Path, *, app_root: Path = ROOT) -> bool:
+    """Recognize only fixed-test intentions; never evaluate or execute this text."""
+    if not isinstance(command, str) or not command.strip():
+        return False
+    text = command.strip()
+    # No expansions, pipelines, redirection, multiline input or command chains.
+    if any(char in text for char in ('$', '`', '\r', '\n', '|', '<', '>')) or '&&' in text:
+        return False
+    if text.count(';') > 1:
+        return False
+    if ';' in text:
+        prefix, text = (part.strip() for part in text.split(';', 1))
+        match = re.fullmatch(r'(?:cd|Set-Location)(?:\s+-(?:LiteralPath|Path))?\s+(.+)', prefix, re.I)
+        if not match:
+            return False
+        location = match.group(1).strip()
+        if location.startswith(('"', "'")):
+            if len(location) < 2 or location[-1] != location[0] or location[0] in location[1:-1]:
+                return False
+            location = location[1:-1]
+        elif any(char in location for char in ('"', "'", '&')):
+            return False
+        try:
+            if Path(location).resolve() != workspace.resolve():
+                return False
+        except (OSError, ValueError):
+            return False
+    if text.startswith('&'):
+        text = text[1:].lstrip()
+        if not text.startswith(('"', "'")):
+            return False
+    if '&' in text:
+        return False
+    # The argument marker separates even a bare known interpreter path with
+    # spaces from its arguments. Every interpreter is compared as a full path.
+    match = re.fullmatch(r'(.+?)\s+(-m\s+unittest(?:\s+.*)?|(?:\.\\|\./)?fixed_tests\.py(?:\s+.*)?)', text, re.I)
+    if not match:
+        return False
+    executable, tail = match.groups()
+    executable = executable.strip()
+    if executable.startswith(('"', "'")):
+        if len(executable) < 2 or executable[-1] != executable[0] or executable[0] in executable[1:-1]:
+            return False
+        executable = executable[1:-1]
+    elif any(char in executable for char in ('"', "'")):
+        return False
+    if executable.casefold() not in {'python', 'python.exe'}:
+        try:
+            known = {Path(sys.executable).resolve(), (Path(app_root) / 'runtime/python/python.exe').resolve()}
+            if not Path(executable).is_absolute() or Path(executable).resolve() not in known:
+                return False
+        except (OSError, ValueError):
+            return False
+    arguments = tail.split()
+    if len(arguments) >= 2 and arguments[0].casefold() == '-m' and arguments[1].casefold() == 'unittest':
+        arguments = arguments[2:]
+    elif arguments[0].casefold() in {'fixed_tests.py', './fixed_tests.py', '.\\fixed_tests.py'}:
+        arguments = arguments[1:]
+    else:
+        return False
+    if any(arg not in {'-q', '-v', 'fixed_tests.py'} for arg in arguments):
+        return False
+    if len(arguments) > 2 or len(set(arguments)) != len(arguments):
+        return False
+    return not ('-q' in arguments and '-v' in arguments)
+
+
 def evaluation_agent(core, workspace, tests, emit, cancel, model, think):
     class EvaluationAgent(core.Agent):
         def _inference_options(self):
@@ -259,9 +329,9 @@ def evaluation_agent(core, workspace, tests, emit, cancel, model, think):
             return super()._execute(name,arguments)
 
         def _run_command(self, command, timeout_seconds=90):
-            if command.strip() != VALIDATION_COMMAND:
+            if not is_validation_command(command, workspace, app_root=getattr(core, 'APP_ROOT', ROOT)):
                 self._denied = True
-                raise PermissionError("Only python -m unittest -q is approved for this evaluation; no shell is executed.")
+                raise PermissionError("Only the fixed unittest checks from this project are approved; no shell is executed.")
             self._check_cancelled()
             result = validate(workspace,tests,timeout=min(20,max(1,int(timeout_seconds))))
             self._record_command_result(result)
@@ -299,6 +369,7 @@ def evaluate(case, core, directory, *, model, think, max_steps, max_seconds):
     elapsed=round(time.monotonic()-start,2)
     errors=[item["payload"] for item in events if item["event"]=="error"]
     report={"task":case,"model":model,"think":think,"seed":42,
+            "harness_protocol":HARNESS_PROTOCOL,"harness_sha256":HARNESS_SOURCE_SHA256,
             "core_sha256":getattr(core,"_benchmark_source_sha256",None) or hashlib.sha256(Path(core.__file__).read_bytes()).hexdigest(),
             "max_steps":max_steps,"max_seconds":max_seconds,
             "passed":after["exit_code"]==0,"baseline_failed":before["exit_code"]!=0,
@@ -342,7 +413,7 @@ def main(argv=None):
     results=[]
     for case in args.tasks:
         results.append(evaluate(case,core,directory/case,model=args.model,think=args.think,max_steps=args.max_steps,max_seconds=args.max_seconds))
-        (directory/"summary.json").write_text(json.dumps({"model":args.model,"think":args.think,"core_path":str(args.core_path) if args.core_path else None,"results":results},ensure_ascii=False,indent=2),encoding="utf-8")
+        (directory/"summary.json").write_text(json.dumps({"model":args.model,"think":args.think,"core_path":str(args.core_path) if args.core_path else None,"harness_protocol":HARNESS_PROTOCOL,"harness_sha256":HARNESS_SOURCE_SHA256,"results":results},ensure_ascii=False,indent=2),encoding="utf-8")
         print(json.dumps(results[-1],ensure_ascii=False),flush=True)
     print("Private report: "+str(directory/"summary.json"),flush=True)
     return 0 if all(item["passed"] for item in results) else 1
