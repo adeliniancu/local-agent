@@ -75,6 +75,22 @@ class AttachmentCoreTests(unittest.TestCase):
         self.assertFalse(self.agent._records()[0].get("_images_processed", False))
         self.assertTrue(any(kind == "memory" for kind, _ in self.events))
 
+    def test_eight_k_image_survives_context_retry_with_bounded_text(self):
+        self.options.return_value = {"num_ctx": 8192, "num_gpu": 0}
+        requests = []
+        def chat_once():
+            requests.append(self.agent._messages())
+            if len(requests) == 1:
+                raise RuntimeError("context length exceeded")
+            return {"role": "assistant", "content": "The reference is red."}
+        self.agent._chat_once = chat_once
+        self.agent.run("Inspect this image. " + "Long context " * 5000, [self.image])
+        self.assertEqual(len(requests), 2)
+        self.assertTrue(all(sum(len(message.get("images", [])) for message in request) == 1 for request in requests))
+        self.assertLessEqual(self.agent._request_size(requests[1]), 9500)
+        self.assertTrue(self.agent._records()[0]["_images_processed"])
+        self.assertFalse([data for kind, data in self.events if kind == "error"])
+
     def test_unsupported_image_rejected_before_history_append(self):
         self.agent.vision_supported = False
         self.agent._chat = lambda: self.fail("No inference should run")

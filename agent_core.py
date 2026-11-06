@@ -703,7 +703,10 @@ class Agent:
     @staticmethod
     def _scaled_context_bytes(value, context):
         # Tool schemas are fixed overhead; scale the remaining conversation space.
-        return 4000 + int((value - 4000) * min(context, 16384) / 16384)
+        budget = 4000 + int((value - 4000) * min(context, 16384) / 16384)
+        # A supported 8K model with an image still needs the fixed tool schemas.
+        # These are text-byte heuristics, not claimed exact token measurements.
+        return max(9500, budget) if value == 16_000 and context < 8192 else budget
 
     def _context_budgets(self):
         context = self._context_window()
