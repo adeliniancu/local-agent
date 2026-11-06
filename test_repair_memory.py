@@ -45,6 +45,10 @@ class RepairMemoryTests(unittest.TestCase):
             parts.append(page["content"])
             start = page["next_start"]
         self.assertEqual("".join(parts), original)
+        (self.root / "tiny.txt").write_text("🙂x", encoding="utf-8")
+        first = self.agent._read_file(self.root / "tiny.txt", 0, 1)
+        self.assertEqual(first["content"], "🙂")
+        self.assertEqual(first["next_start"], 1)
 
     def test_related_source_pages_survive_together_after_compaction(self):
         original = "# startup\n" + "x = 'first section'\n" * 230

@@ -175,7 +175,8 @@ class Agent:
         if type(max_chars) is not int or not 1 <= max_chars <= 4000:
             raise ValueError("max_chars must be between 1 and 4000.")
         budget = min(max_chars, 4000 if self._context_window() >= 16384 else 1600)
-        page = text[start:start + budget].encode("utf-8")[:budget].decode("utf-8", errors="ignore")
+        # Even a one-character request must advance across a four-byte codepoint.
+        page = text[start:start + budget].encode("utf-8")[:max(4, budget)].decode("utf-8", errors="ignore")
         end = start + len(page)
         observed = self._file_versions.get(path, {})
         ranges = list(observed.get("ranges", [])) if observed.get("sha256") == version else []
