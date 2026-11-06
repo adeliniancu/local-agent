@@ -130,8 +130,9 @@ def run_checks(source: str, checks: str) -> dict:
     try:
         exec(compile(source, "helper.py", "exec"), namespace)
         exec(compile(checks, "check_helper.py", "exec"), namespace)
-    except Exception:
-        return {"exit_code": 1, "output": traceback.format_exc(limit=1)}
+    except Exception as error:
+        # Keep executor paths out of portable training examples.
+        return {"exit_code": 1, "output": "".join(traceback.format_exception_only(type(error), error))}
     return {"exit_code": 0, "output": "All functional assertions passed.\n"}
 
 
@@ -194,8 +195,10 @@ print({"training_examples": len(rows["train.jsonl"]), "validation_examples": len
 import torch
 assert torch.cuda.is_available(), "Select a GPU runtime"
 assert torch.cuda.get_device_properties(0).total_memory >= 10 * 1024**3, "Published bf16 4B requirement is about 10 GB; do not switch silently to 4-bit"
+bf16_supported = torch.cuda.is_bf16_supported()
 model, tokenizer = FastLanguageModel.from_pretrained(
     model_name={MODEL!r}, revision={MODEL_REVISION!r}, max_seq_length=4096,
+    dtype=torch.bfloat16 if bf16_supported else torch.float16,
     load_in_4bit=False, load_in_16bit=True, full_finetuning=False)
 model = FastLanguageModel.get_peft_model(
     model, r=8, target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
@@ -215,6 +218,7 @@ train_data, validation_data = formatted("train.jsonl"), formatted("validation.js
 trainer = SFTTrainer(model=model, tokenizer=tokenizer, train_dataset=train_data, eval_dataset=validation_data,
     args=SFTConfig(dataset_text_field="text", max_length=4096, packing=False,
         per_device_train_batch_size=1, per_device_eval_batch_size=1, gradient_accumulation_steps=4,
+        bf16=bf16_supported, fp16=not bf16_supported,
         learning_rate=5e-5, num_train_epochs=1, logging_steps=1, eval_strategy="epoch",
         optim="adamw_8bit", seed=3407, output_dir="coding_adapter", report_to="none"))
 result = trainer.train()
