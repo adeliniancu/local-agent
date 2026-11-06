@@ -240,6 +240,9 @@ def load_core(core_path: Path | None = None):
 
 def evaluation_agent(core, workspace, tests, emit, cancel, model, think):
     class EvaluationAgent(core.Agent):
+        def _inference_options(self):
+            return {**super()._inference_options(), "seed": 42}
+
         def _execute(self, name, arguments):
             if name not in {"list_files","read_file","write_file","edit_file","search_files","run_command","set_plan","read_working_history"}:
                 raise PermissionError("This development evaluation permits only project file tools and the fixed test command.")
@@ -287,7 +290,10 @@ def evaluate(case, core, directory, *, model, think, max_steps, max_seconds):
     after=validate(workspace,tests)
     elapsed=round(time.monotonic()-start,2)
     errors=[item["payload"] for item in events if item["event"]=="error"]
-    report={"task":case,"model":model,"think":think,"passed":after["exit_code"]==0,"baseline_failed":before["exit_code"]!=0,
+    report={"task":case,"model":model,"think":think,"seed":42,
+            "core_sha256":hashlib.sha256(Path(core.__file__).read_bytes()).hexdigest(),
+            "max_steps":max_steps,"max_seconds":max_seconds,
+            "passed":after["exit_code"]==0,"baseline_failed":before["exit_code"]!=0,
             "elapsed_seconds":elapsed,"tool_calls":sum(item["event"]=="tool" for item in events),
             "timed_out":cancel.is_set(),"errors":errors,"validation":after,"history":agent.history,"events":events}
     (directory/"result.json").write_text(json.dumps(report,ensure_ascii=False,indent=2),encoding="utf-8")
