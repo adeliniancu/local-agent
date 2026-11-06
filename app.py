@@ -218,6 +218,10 @@ class LocalAgentApp:
 
         main = tk.Frame(self.root, bg=COLORS["bg"])
         main.pack(side="left", fill="both", expand=True)
+        # Reserve the composer before the expandable chat/settings area so it
+        # remains reachable even at the minimum window size.
+        self.footer_frame = tk.Frame(main, bg=COLORS["bg"])
+        self.footer_frame.pack(side="bottom", fill="x")
         header = tk.Frame(main, bg=COLORS["bg"])
         header.pack(fill="x", padx=30, pady=(27, 18))
         self._label(header, "Let's get to work.", size=19, bold=True).pack(side="left")
@@ -295,13 +299,13 @@ class LocalAgentApp:
         }.items():
             self.transcript.tag_configure(name, **opts)
 
-        self.status_label = self._label(main, "Choose a folder, then tell your agent what to do.", size=9, color=COLORS["muted"], anchor="w")
+        self.status_label = self._label(self.footer_frame, "Choose a folder, then tell your agent what to do.", size=9, color=COLORS["muted"], anchor="w")
         self.status_label.pack(fill="x", padx=31, pady=(5, 2))
-        self.metrics_label = self._label(main, "Elapsed 00:00 · Last generation — tokens/s", size=8, color=COLORS["muted"], anchor="w")
+        self.metrics_label = self._label(self.footer_frame, "Elapsed 00:00 · Last generation — tokens/s", size=8, color=COLORS["muted"], anchor="w")
         self.metrics_label.pack(fill="x", padx=31, pady=(0, 8))
-        self.memory_label = self._label(main, "Working memory summarized · Full chat saved", size=8,
+        self.memory_label = self._label(self.footer_frame, "Working memory summarized · Full chat saved", size=8,
                                         color=COLORS["mint"], anchor="w")
-        composer_border = tk.Frame(main, bg=COLORS["border"], padx=1, pady=1)
+        composer_border = tk.Frame(self.footer_frame, bg=COLORS["border"], padx=1, pady=1)
         self.composer_border = composer_border
         composer_border.pack(fill="x", padx=30)
         composer = tk.Frame(composer_border, bg=COLORS["panel"])
@@ -327,7 +331,7 @@ class LocalAgentApp:
         self.send_button.pack(side="right")
         self.stop_button = self._button(composer_actions, "Stop", self.stop, state="disabled")
         self.stop_button.pack(side="right", padx=(0, 8))
-        self._label(main, "Files · Code · Terminal", size=8, color=COLORS["muted"]).pack(pady=(10, 16))
+        self._label(self.footer_frame, "Files · Code · Terminal", size=8, color=COLORS["muted"]).pack(pady=(10, 16))
         self._refresh_memory_indicator()
         self.input.focus_set()
 
