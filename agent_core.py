@@ -20,6 +20,7 @@ from typing import Callable
 from urllib.parse import urlsplit
 import uuid
 
+import runtime
 from runtime import BASE_URL, MODEL, ROOT as APP_ROOT
 
 MAX_FILE_BYTES = 1_048_576
@@ -105,6 +106,7 @@ class Agent:
         self.poll_messages = poll_messages
         self.think = bool(think)
         self.performance_profile = performance_profile
+        self._inference_options_cache: dict | None = None
         self.history: list[dict] = []
         self.plan: list[dict] = []
         self._denied = False
@@ -159,7 +161,9 @@ class Agent:
                 raise ValueError("Only regular files can be overwritten.")
             if path.stat().st_size > MAX_FILE_BYTES:
                 raise ValueError("Existing file is larger than 1 MB; use a focused edit.")
-            if path.read_bytes() == encoded:
+            with path.open("rb") as existing:
+                unchanged = existing.read(MAX_FILE_BYTES + 1) == encoded
+            if unchanged:
                 return {"path": str(path.relative_to(self.workspace)), "bytes_written": 0,
                         "unchanged": True, "note": "The file already has this exact content."}
             stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
@@ -813,15 +817,13 @@ class Agent:
         connection = http.client.HTTPConnection(parsed.hostname, parsed.port or 80, timeout=600)
         inbox = queue.Queue()
         transport_sockets = []
-        try:
-            gpu_layers = max(0, min(999, int(os.environ.get("LOCAL_AGENT_GPU_LAYERS", "10"))))
-        except ValueError:
-            gpu_layers = 10
+        if self._inference_options_cache is None:
+            self._inference_options_cache = runtime.get_inference_options(self.model, self.performance_profile)
         available_tools = self._available_tools()
         payload = json.dumps({"model": self.model, "messages": messages, "tools": available_tools,
                               "stream": True, "think": self.think, "keep_alive": "2m",
-                              "options": {"num_ctx": 16384, "num_predict": 4096,
-                                          "num_gpu": gpu_layers, "temperature": 0.2}}).encode("utf-8")
+                              "options": {**self._inference_options_cache, "num_predict": 4096,
+                                          "temperature": 0.2}}).encode("utf-8")
 
         def fetch():
             try:
@@ -975,6 +977,7 @@ class Agent:
         self._unanswered = False
         self._stuck = False
         self._command_failures.clear()
+        self._inference_options_cache = None
         seen_progress: set[str] = set()
         idle_tools = 0
         pause_reason = None

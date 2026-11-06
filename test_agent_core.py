@@ -299,6 +299,11 @@ class CoreTests(unittest.TestCase):
 
 
 class StreamTests(unittest.TestCase):
+    def setUp(self):
+        resolver = patch("agent_core.runtime.get_inference_options", return_value={"num_ctx": 16384, "num_gpu": 10})
+        self.resolve_options = resolver.start()
+        self.addCleanup(resolver.stop)
+
     def run_server(self, handler_function):
         class Handler(http.server.BaseHTTPRequestHandler):
             def do_POST(self):
@@ -371,6 +376,27 @@ class StreamTests(unittest.TestCase):
                                     "tokens_per_second": 24.0, "prompt_eval_count": 32,
                                     "total_duration_seconds": 2.0}])
         self.assertEqual([data["text"] for kind, data in events if kind == "token"], ["Done."])
+
+    def test_profile_options_are_stable_for_a_task_and_refresh_next_task(self):
+        requests = []
+        def respond(handler):
+            requests.append(handler.request_payload)
+            handler.send_response(200)
+            handler.end_headers()
+            handler.wfile.write(b'{"message":{"content":"Done."},"done":true}\n')
+        endpoint = self.run_server(respond)
+        self.resolve_options.side_effect = [{"num_ctx": 16384, "num_gpu": 26},
+                                            {"num_ctx": 16384, "num_gpu": 35}]
+        with tempfile.TemporaryDirectory() as workspace:
+            agent = Agent(workspace, lambda *_: None, lambda *_: True, threading.Event(),
+                          model="custom-local:4b", base_url=endpoint, performance_profile="rtx4070_laptop")
+            agent._chat()
+            agent._chat()
+            agent.run("Next task")
+        self.assertEqual([item["options"]["num_gpu"] for item in requests], [26, 26, 35])
+        self.assertTrue(all(item["options"]["num_ctx"] == 16384 for item in requests))
+        self.assertEqual(self.resolve_options.call_count, 2)
+        self.resolve_options.assert_called_with("custom-local:4b", "rtx4070_laptop")
 
     def test_stop_during_silent_inference_returns_promptly(self):
         release = threading.Event()
