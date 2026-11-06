@@ -227,14 +227,16 @@ def validate(workspace: Path, tests: Path, *, timeout: float = 20) -> dict:
 
 
 def load_core(core_path: Path | None = None):
-    if core_path is None:
-        import agent_core
-        return agent_core
-    spec = importlib.util.spec_from_file_location("_benchmark_agent_core", core_path.resolve())
+    path = (core_path or ROOT / "agent_core.py").resolve()
+    source = path.read_bytes()
+    spec = importlib.util.spec_from_file_location("_benchmark_agent_core", path)
     if spec is None or spec.loader is None:
         raise ValueError("Cannot import the requested agent core.")
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    # Compile exactly the bytes being fingerprinted, including frozen baselines.
+    # Concurrent source saves cannot relabel the loaded implementation later.
+    exec(compile(source, str(path), "exec"), module.__dict__)
+    module._benchmark_source_sha256 = hashlib.sha256(source).hexdigest()
     return module
 
 
@@ -291,7 +293,7 @@ def evaluate(case, core, directory, *, model, think, max_steps, max_seconds):
     elapsed=round(time.monotonic()-start,2)
     errors=[item["payload"] for item in events if item["event"]=="error"]
     report={"task":case,"model":model,"think":think,"seed":42,
-            "core_sha256":hashlib.sha256(Path(core.__file__).read_bytes()).hexdigest(),
+            "core_sha256":getattr(core,"_benchmark_source_sha256",None) or hashlib.sha256(Path(core.__file__).read_bytes()).hexdigest(),
             "max_steps":max_steps,"max_seconds":max_seconds,
             "passed":after["exit_code"]==0,"baseline_failed":before["exit_code"]!=0,
             "elapsed_seconds":elapsed,"tool_calls":sum(item["event"]=="tool" for item in events),

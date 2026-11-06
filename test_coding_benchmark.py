@@ -62,5 +62,20 @@ class CodingBenchmarkTests(unittest.TestCase):
             with benchmark.run_limits(agent_core,2,3): raise RuntimeError('test')
         self.assertEqual((agent_core.MAX_RUN_STEPS,agent_core.MAX_RUN_SECONDS),previous)
 
+    def test_evaluation_seed_preserves_model_runtime_options(self):
+        workspace,tests=benchmark.prepare_case('ledger',self.root/'case')
+        agent=benchmark.evaluation_agent(agent_core,workspace,tests,lambda *_:None,threading.Event(),'fake',False)
+        with patch.object(agent_core.Agent,'_inference_options',return_value={'num_ctx':16384,'num_gpu':-1}):
+            self.assertEqual(agent._inference_options(),{'num_ctx':16384,'num_gpu':-1,'seed':42})
+
+    def test_core_fingerprint_matches_loaded_bytes_after_source_changes(self):
+        source=self.root/'frozen_core.py'
+        source.write_text('VALUE=1\n',encoding='utf-8')
+        loaded=benchmark.load_core(source)
+        source.write_text('VALUE=2\n',encoding='utf-8')
+        import hashlib
+        self.assertEqual(loaded.VALUE,1)
+        self.assertEqual(loaded._benchmark_source_sha256,hashlib.sha256(b'VALUE=1\n').hexdigest())
+
 
 if __name__=='__main__': unittest.main()
