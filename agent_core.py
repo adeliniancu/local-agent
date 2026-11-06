@@ -301,7 +301,8 @@ class Agent:
         finally:
             if temp_name and os.path.exists(temp_name):
                 os.unlink(temp_name)
-        result = {"path": str(path.relative_to(self.workspace)), "bytes_written": len(encoded)}
+        result = {"path": str(path.relative_to(self.workspace)), "bytes_written": len(encoded),
+                  "note": "File revision changed; earlier test results describe the old revision. Run relevant checks when this repair is ready."}
         self._file_versions[path] = {"sha256": hashlib.sha256(encoded).hexdigest(), "complete": complete_read}
         if backup:
             result["backup"] = str(backup.relative_to(self.workspace))
