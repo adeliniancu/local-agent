@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
 import http.client
 import json
 import os
@@ -23,6 +24,11 @@ from runtime import BASE_URL, MODEL, ROOT as APP_ROOT
 
 MAX_FILE_BYTES = 1_048_576
 MAX_TOOL_OUTPUT = 16_000
+CONTINUATION_STEPS = 24
+MAX_RUN_STEPS = 120
+MAX_RUN_SECONDS = 60 * 60
+NO_PROGRESS_WARNING = 4
+NO_PROGRESS_LIMIT = 8
 # Conservative byte budgets leave room for tools, template tokens and a response
 # in the 16K model window. Ollama remains the authority on its exact token count.
 CONTEXT_BUDGET_BYTES = 24_000
@@ -151,6 +157,9 @@ class Agent:
                 raise ValueError("Only regular files can be overwritten.")
             if path.stat().st_size > MAX_FILE_BYTES:
                 raise ValueError("Existing file is larger than 1 MB; use a focused edit.")
+            if path.read_bytes() == encoded:
+                return {"path": str(path.relative_to(self.workspace)), "bytes_written": 0,
+                        "unchanged": True, "note": "The file already has this exact content."}
             stamp = dt.datetime.now().strftime("%Y%m%d-%H%M%S") + "-" + uuid.uuid4().hex[:8]
             backup = self.workspace / BACKUP_DIR / stamp / path.relative_to(self.workspace)
             # Resolve again so an externally created backup symlink cannot redirect writes.
@@ -929,19 +938,56 @@ class Agent:
                               "prompt_eval_count": count("prompt_eval_count"),
                               "total_duration_seconds": seconds("total_duration")})
 
+    def _progress_signature(self, name: str, arguments: dict, result: dict) -> str | None:
+        """A bounded heuristic: new evidence/file states count, repeated outputs do not."""
+        if (not isinstance(result, dict) or result.get("error") or result.get("skipped")
+                or result.get("unchanged") or result.get("exit_code", 0) != 0
+                or name == "set_plan"):
+            return None
+        stable = {key: value for key, value in result.items()
+                  if key not in {"backup", "recovery_hint", "total_messages", "note"}}
+        if name in {"write_file", "replace_text"}:
+            try:
+                path = self._path(arguments["path"])
+                stable = {"path": str(path.relative_to(self.workspace)),
+                          "content_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+            except (OSError, ValueError, KeyError):
+                return None
+        # Different commands can do useful work while producing identical stdout.
+        # Read/list/search results already identify the evidence they returned.
+        identity = [name, stable, arguments.get("command") if name == "run_command" else None]
+        return hashlib.sha256(json.dumps(identity, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()
+
+    def _pause(self, reason: str) -> None:
+        text = f"{reason} Completed changes and working history are saved. Send 'Continue' or a new instruction to resume."
+        self.history.append({"role": "assistant", "content": text})
+        self.emit("assistant", {"text": text})
+        self.emit("status", {"text": "Paused. Your work is saved."})
+
     def run(self, prompt: str) -> None:
         self._denied = False
         self._unanswered = False
         self._stuck = False
         self._command_failures.clear()
+        seen_progress: set[str] = set()
+        idle_tools = 0
+        pause_reason = None
+        deadline = time.monotonic() + MAX_RUN_SECONDS
         try:
             self._check_cancelled()
             if not isinstance(prompt, str) or not prompt.strip():
                 raise ValueError("Enter a task first.")
             self.history.append({"role": "user", "content": prompt.strip()})
-            for step in range(24):
+            for step in range(MAX_RUN_STEPS):
                 self._check_cancelled()
-                self._drain_messages()
+                if self._drain_messages():
+                    idle_tools = 0
+                if time.monotonic() >= deadline:
+                    self._pause("Paused at the one-hour run budget.")
+                    return
+                if step and step % CONTINUATION_STEPS == 0:
+                    self.emit("status", {"text": f"Continuing automatically after {step} model steps; working history is preserved."})
+                    self.emit("continuation", {"steps": step, "automatic": True})
                 self.emit("status", {"text": "Thinking locally…" if step == 0 else "Checking the results…"})
                 message = self._chat()
                 self.history.append(message)
@@ -950,8 +996,10 @@ class Agent:
                 calls = message.get("tool_calls") or []
                 if not calls:
                     if not message.get("content"):
-                        raise RuntimeError("The model returned an empty response. Please try again.")
+                        self._pause("Paused because the local model returned no answer or action.")
+                        return
                     if self._drain_messages():
+                        idle_tools = 0
                         continue
                     return
                 for call in calls:
@@ -965,11 +1013,28 @@ class Agent:
                             raise PermissionError("Task paused because a necessary question was not answered.")
                         if self._stuck:
                             raise RuntimeError("Task paused after repeated command failures. Await user direction.")
-                        result = self._execute(name, arguments)
+                        if time.monotonic() >= deadline:
+                            pause_reason = "Paused at the one-hour run budget."
+                        if pause_reason:
+                            result = {"skipped": True, "reason": pause_reason}
+                        else:
+                            result = self._execute(name, arguments)
                     except Cancelled:
                         result = {"error": "Stopped by user; this tool was not completed."}
                     except Exception as exc:
                         result = {"error": f"{type(exc).__name__}: {exc}"}
+                    if not pause_reason and not self.cancel_event.is_set():
+                        signature = self._progress_signature(name, arguments, result)
+                        if signature is not None and signature not in seen_progress:
+                            seen_progress.add(signature)
+                            idle_tools = 0
+                        else:
+                            idle_tools += 1
+                        if idle_tools >= NO_PROGRESS_LIMIT:
+                            pause_reason = "Paused because eight tool actions produced no new result or file state."
+                            result["paused"] = pause_reason
+                        elif idle_tools >= NO_PROGRESS_WARNING:
+                            result["recovery_hint"] = "Recent actions repeated existing results or made no progress. Change your approach, use the evidence already collected, or explain the blocker; do not repeat the same reads or writes."
                     serialized = json.dumps(result, ensure_ascii=False)
                     self.history.append({"role": "tool", "tool_name": name, "content": serialized})
                     self.emit("tool_result", {"name": name, "result": result})
@@ -978,9 +1043,11 @@ class Agent:
                 if steering_count:
                     self._denied = self._unanswered = self._stuck = False
                     self._command_failures.clear()
+                    idle_tools = 0
+                    pause_reason = None
                     continue
                 if self._stuck:
-                    self.emit("error", {"text": "Paused after the same command error occurred three times. Review the error or provide a new instruction; completed changes remain saved."})
+                    self._pause("Paused after the same command error occurred three times. Review the error or change the approach.")
                     return
                 if self._denied:
                     self.emit("status", {"text": "Command declined. Task paused; you can give a new instruction."})
@@ -988,7 +1055,10 @@ class Agent:
                 if self._unanswered:
                     self.emit("status", {"text": "Question left unanswered. Task paused; you can give a new instruction."})
                     return
-            raise RuntimeError("Stopped after 24 model steps. Review the work, then ask the agent to continue if needed.")
+                if pause_reason:
+                    self._pause(pause_reason)
+                    return
+            self._pause(f"Paused at the {MAX_RUN_STEPS}-step run budget.")
         except Cancelled:
             self.emit("status", {"text": "Stopped. Completed file changes remain saved."})
         except Exception as exc:
