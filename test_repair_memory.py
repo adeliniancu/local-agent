@@ -24,7 +24,7 @@ class RepairMemoryTests(unittest.TestCase):
         for i in range(30):
             records += tool_group("list_files", {}, {"entries": "older information" * 500})
         records += tool_group("run_command", {"command": "python main.py"},
-                              {"exit_code": 1, "output": "Traceback\nAttributeError: TodoApp has no status_label"})
+                              {"exit_code": 1, "output": "Traceback\nAttributeError: TodoApp has no status_label\n\n----------\nRan 5 tests in 0.2s\n\nFAILED (errors=5)"})
         page = self.agent._execute("read_file", {"path": "main.py"})
         records += tool_group("read_file", {"path": "main.py"}, page)
         self.agent.history = records
