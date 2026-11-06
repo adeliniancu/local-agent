@@ -26,7 +26,7 @@ PROFILE_LABELS = {
 }
 CODING_MODELS = {
     "Fast / smaller · Qwen 3.5 4B": (DEFAULT_MODEL, "About 3.3 GB. The default for this app."),
-    "Larger model · Qwen 3.5 9B": ("qwen3.5:9b-q4_K_M", "About 6.6 GB. May be slower or use system RAM on an 8 GB GPU."),
+    "Coding + images · Qwen 3.5 9B": ("qwen3.5:9b-q4_K_M", "About 6.6 GB. May be slower or use system RAM on an 8 GB GPU."),
 }
 try:
     from version import __version__ as APP_VERSION

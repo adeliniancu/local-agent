@@ -586,7 +586,7 @@ class DesktopTests(unittest.TestCase):
 
     def test_coding_preset_fills_exact_model_without_download(self):
         with patch("runtime.pull_model") as download:
-            self.ui.coding_preset_var.set("Larger model · Qwen 3.5 9B")
+            self.ui.coding_preset_var.set("Coding + images · Qwen 3.5 9B")
             self.ui._coding_preset_changed()
             download.assert_not_called()
         self.assertEqual(self.ui.download_name_var.get(), "qwen3.5:9b-q4_K_M")
@@ -622,6 +622,25 @@ class DesktopTests(unittest.TestCase):
         self.ui._render_history()
         self.assertIn("Which language?", self.ui.transcript.get("1.0", "end"))
         self.assertIn("YOU · ANSWER", self.ui.transcript.get("1.0", "end"))
+
+    def test_attachment_reaches_agent_and_is_retained_in_saved_history(self):
+        from agent_core import Agent
+        item = self.attachment(content="A small code reference")
+        self.ui.model_vision_support = True
+        self.ui._add_attachments([item])
+        with patch.object(Agent, "_chat", return_value={"role": "assistant", "content": "I read the attachment."}):
+            self.ui.send()
+            deadline = time.monotonic() + 5
+            while self.ui.busy and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(0.01)
+            self.assertFalse(self.ui.busy, "Attachment task did not finish")
+        saved = json.loads(app.STATE.read_text())
+        message = next(entry for entry in saved["history"] if entry.get("attachments"))
+        self.assertEqual(message["attachments"][0]["id"], item["id"])
+        self.assertEqual(message["user_text"], "")
+        self.assertIn("A small code reference", message["content"])
+        self.assertTrue(self.ui.agent.vision_supported)
 
 
 if __name__ == "__main__":
