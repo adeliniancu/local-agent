@@ -1,0 +1,137 @@
+{
+  "collected": "2026-11-06",
+  "files": [
+    {
+      "file": "OLLAMA-MIT-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/ollama/ollama/v0.40.15/LICENSE",
+      "sha256": "5934ed2ce0d15154bcdb9c85203210abac0da4314af34081e36df4599f90b226",
+      "bytes": 1058
+    },
+    {
+      "file": "TCL-9.0.4-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/tcltk/tcl/core-9-0-4/license.terms",
+      "sha256": "c0a69a2bfd757361ec7e6143973b103c90409316b49e9c88db26ad6388e79f16",
+      "bytes": 2255
+    },
+    {
+      "file": "TK-9.0.4-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/tcltk/tk/core-9-0-4/license.terms",
+      "sha256": "2cde822b93ca16ae535c954b7dfe658b4ad10df2a193628d1b358f1765e8b198",
+      "bytes": 2267
+    },
+    {
+      "file": "LLVM-LIBCXX-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/llvm/llvm-project/main/libcxx/LICENSE.TXT",
+      "sha256": "539dd7aed86e8a4f12cbdd0e6c50c189c7d74847e4fecc64ce2c6ee3a01da38b",
+      "bytes": 16703
+    },
+    {
+      "file": "LLVM-LIBUNWIND-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/llvm/llvm-project/main/libunwind/LICENSE.TXT",
+      "sha256": "b5efebcaca80879234098e52d1725e6d9eb8fb96a19fce625d39184b705f7b6d",
+      "bytes": 16706
+    },
+    {
+      "file": "LLVM-OPENMP-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/llvm/llvm-project/main/openmp/LICENSE.TXT",
+      "sha256": "fdad1758a9e1f9d5a81e18879b3406772115edc92c24bfa36b70c654f325e8e4",
+      "bytes": 19741
+    },
+    {
+      "file": "MINGW-WINPTHREADS-COPYING.txt",
+      "source": "https://raw.githubusercontent.com/mingw-w64/mingw-w64/master/mingw-w64-libraries/winpthreads/COPYING",
+      "sha256": "63263614cdd29f2f93cba85e992f041b31f9fc7b4033692f31269489a8a1b177",
+      "bytes": 2883
+    },
+    {
+      "file": "NVIDIA-CUDA-12.8-EULA.html",
+      "source": "https://docs.nvidia.com/cuda/archive/12.8.0/eula/index.html",
+      "sha256": "6722d4c310a2ec9ad869ede3371a648fe2cfc2baaf8e1ece2c35e1dccc05752c",
+      "bytes": 103460
+    },
+    {
+      "file": "NVIDIA-CUDA-13.0-EULA.html",
+      "source": "https://docs.nvidia.com/cuda/archive/13.0.0/eula/index.html",
+      "sha256": "f8babe932f92aa7a25dd560b22d13c0d30c48b280b918eccc62ddb836142cabe",
+      "bytes": 104490
+    },
+    {
+      "file": "CPP_HTTPLIB_LICENSE.txt",
+      "source": "runtime/ollama/lib/ollama/CPP_HTTPLIB_LICENSE",
+      "sha256": "bb546eae5924d8ee842e0e567e6d533c5824bdebccf605f99a5b3429034e6697",
+      "bytes": 1097
+    },
+    {
+      "file": "GO_LICENSE.txt",
+      "source": "runtime/ollama/lib/ollama/GO_LICENSE",
+      "sha256": "4285a95875d7a3ae3790910d59ee88f82339d0ba37b1cbadde4124113bd04308",
+      "bytes": 182211
+    },
+    {
+      "file": "LLAMA_CPP_LICENSE.txt",
+      "source": "runtime/ollama/lib/ollama/LLAMA_CPP_LICENSE",
+      "sha256": "bcd8ec749126d45cb06737d0690295d73df4b6e7e194205bcf91190368f27285",
+      "bytes": 1099
+    },
+    {
+      "file": "LLAMA_CPP_VENDORS_LICENSE.txt",
+      "source": "runtime/ollama/lib/ollama/LLAMA_CPP_VENDORS_LICENSE",
+      "sha256": "7547ae6372a35e7382898dd9f5519ebc16e93095f69c2466b5b74b617c33d4da",
+      "bytes": 7424
+    },
+    {
+      "file": "QWEN3.5-APACHE-2.0-LICENSE.txt",
+      "source": "models/blobs/sha256-50cbab8a892c5f2993b8c7351a99182507472def3b1374558308605d99b86b32",
+      "sha256": "50cbab8a892c5f2993b8c7351a99182507472def3b1374558308605d99b86b32",
+      "bytes": 11343
+    },
+    {
+      "file": "PYTHON-3.15.0-LICENSE.txt",
+      "source": "Official Python 3.15.0 Windows runtime LICENSE.txt; also preserved in runtime/python/LICENSE.txt",
+      "sha256": "935cf13e19f8c31b497d20b05d73623431a226b230c3599bc30fa3348979bc68",
+      "bytes": 35407
+    },
+    {
+      "file": "MICROSOFT-VC-RUNTIME-2015-2022-LICENSE.docx",
+      "source": "https://visualstudio.microsoft.com/wp-content/uploads/2021/09/Visual-C-Runtime-2015-2022-License-1.docx",
+      "sha256": "f1e3d56ceb2ad68aae0711b910375009e651ac5530fa0760f0dea6e81e54fae1",
+      "bytes": 39644
+    },
+    {
+      "file": "MICROSOFT-VC-RUNTIME-2015-2022-LICENSE.txt",
+      "source": "Plain-text paragraph extraction of MICROSOFT-VC-RUNTIME-2015-2022-LICENSE.docx",
+      "sha256": "497276169b492ee04c46b9d05a104bee9c9580c9ed4546a9a357f4377f090f47",
+      "bytes": 6690
+    },
+    {
+      "file": "OPENSSL-3.5.9-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/openssl/openssl/openssl-3.5.9/LICENSE.txt",
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a",
+      "bytes": 10175
+    },
+    {
+      "file": "ZLIB-NG-LICENSE.md",
+      "source": "https://raw.githubusercontent.com/zlib-ng/zlib-ng/develop/LICENSE.md",
+      "sha256": "6c9f0d975b41afaa34d22f55bb8986ce69e5cb7ad327cb2b28820cd425edf5ee",
+      "bytes": 867
+    },
+    {
+      "file": "LIBTOMMATH-LICENSE.txt",
+      "source": "https://raw.githubusercontent.com/libtom/libtommath/develop/LICENSE",
+      "sha256": "2fa64b163659f41965c9815882a8296d3d03ff546b76153e11445f9bdecf955a",
+      "bytes": 1257
+    },
+    {
+      "file": "SQLITE-PUBLIC-DOMAIN.html",
+      "source": "https://www.sqlite.org/copyright.html",
+      "sha256": "44ca9f793055c8e32fc65f65a4f5bcf813a33f5bdaaa084067dd617a4ed3cc70",
+      "bytes": 8351
+    },
+    {
+      "file": "PYTHON-DOCUMENTATION-LICENSE.html",
+      "source": "Official Python 3.15.0 installed documentation license.html (https://docs.python.org/3.15/license.html)",
+      "sha256": "91a7ac45425713e426163b51ac826cea0d774eb3d985b8ceec97ad51ccc5a145",
+      "bytes": 96157
+    }
+  ]
+}

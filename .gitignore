@@ -1,0 +1,13 @@
+runtime/
+models/
+logs/
+data/
+workspace/
+__pycache__/
+dev-tools/
+validation-report.json
+*.pyc
+dist/
+devbackups/
+.updates/
+.localagent-backups/

@@ -1,0 +1,5 @@
+"""Application version and public update channel; no account credentials."""
+APP_ID = "local-agent-windows"
+__version__ = "2.0.0"
+GITHUB_REPOSITORY = "adeliniancu/local-agent"
+UPDATE_FEED_URL = ""

@@ -1,0 +1,102 @@
+LOCAL AGENT - THIRD-PARTY NOTICES
+Collected: 2026-11-06
+
+Local Agent includes the components listed below. Their respective licenses and
+copyright notices continue to apply. These notices do not replace those licenses
+or grant additional rights. Keep this directory and the notices shipped inside
+the runtimes when copying the application. The original vendor binary files and
+downloaded model weights have not been modified by Local Agent.
+
+1. Python 3.15.0 for Windows x64
+   Python Software Foundation and other contributors.
+   License: Python Software Foundation License and the additional component
+   notices included in the official Windows build.
+   Files: PYTHON-3.15.0-LICENSE.txt and runtime/python/LICENSE.txt.
+   The latter is preserved with the Python runtime. The full license includes
+   historical licenses, bundled dependency notices, and the additional
+   conditions applying to Microsoft code in the Windows build.
+   Project: https://www.python.org/
+   License reference: https://docs.python.org/3.15/license.html
+
+   Tcl/Tk 9.0.4 provides the graphical interface used through tkinter.
+   Files: TCL-9.0.4-LICENSE.txt and TK-9.0.4-LICENSE.txt.
+   Sources:
+   https://github.com/tcltk/tcl/blob/core-9-0-4/license.terms
+   https://github.com/tcltk/tk/blob/core-9-0-4/license.terms
+
+   Additional notices for the Python runtime's bundled libraries:
+   - OpenSSL 3.5.9: OPENSSL-3.5.9-LICENSE.txt (Apache License 2.0).
+   - SQLite 3.53.4: SQLITE-PUBLIC-DOMAIN.html (public-domain dedication).
+   - zlib-ng, reporting compatibility version 1.3.1.zlib-ng:
+     ZLIB-NG-LICENSE.md (zlib license).
+   - LibTomMath: LIBTOMMATH-LICENSE.txt (public-domain dedication).
+   PYTHON-DOCUMENTATION-LICENSE.html preserves the official Python license
+   documentation with its additional included-software notices.
+
+2. Ollama 0.40.15, official Windows amd64 runtime
+   Copyright (c) Ollama. License: MIT.
+   File: OLLAMA-MIT-LICENSE.txt.
+   Release: https://github.com/ollama/ollama/releases/tag/v0.40.15
+   Source: https://github.com/ollama/ollama/tree/v0.40.15
+
+   Ollama's bundled llama.cpp/ggml, cpp-httplib, Go components and other
+   dependencies retain the notices supplied in the original runtime archive:
+   - GO_LICENSE.txt
+   - LLAMA_CPP_LICENSE.txt
+   - LLAMA_CPP_VENDORS_LICENSE.txt
+   - CPP_HTTPLIB_LICENSE.txt
+   The originals also remain in runtime/ollama/lib/ollama/.
+
+   The archive also contains LLVM runtime libraries libc++.dll, libunwind.dll,
+   and libomp.dll, and MinGW-w64 libwinpthread-1.dll. Their separate build
+   versions are not identified by the DLL version metadata. The following
+   upstream notices accompany them, in addition to the archive's own notices:
+   - LLVM-LIBCXX-LICENSE.txt
+   - LLVM-LIBUNWIND-LICENSE.txt
+   - LLVM-OPENMP-LICENSE.txt
+   - MINGW-WINPTHREADS-COPYING.txt
+   Sources: https://github.com/llvm/llvm-project
+            https://github.com/mingw-w64/mingw-w64
+
+3. Qwen3.5 4B model, Ollama tag qwen3.5:4b-q4_K_M
+   Copyright 2026 Alibaba Cloud. License: Apache License 2.0.
+   File: QWEN3.5-APACHE-2.0-LICENSE.txt.
+   This is the exact license layer downloaded with this model, including its
+   copyright notice. The bundle contains the upstream quantized model and
+   vision projector unchanged; Local Agent has not retrained the model.
+   Model: https://ollama.com/library/qwen3.5:4b-q4_K_M
+   Original model: https://huggingface.co/Qwen/Qwen3.5-4B
+
+4. NVIDIA CUDA runtime components bundled with Ollama
+   Copyright NVIDIA Corporation. These components use NVIDIA's proprietary
+   CUDA license terms, not Ollama's MIT license.
+   The cuda_v12 and cuda_v13 runtime folders contain CUDA 12.8 and 13.0
+   components respectively, including cudart and cuBLAS; cuda_v13 also includes
+   NVRTC and nvJitLink. The CUDA runtime DLLs identify versions 12080 and 13000.
+   Files: NVIDIA-CUDA-12.8-EULA.html and NVIDIA-CUDA-13.0-EULA.html.
+   These full official documents include the SDK agreement, CUDA supplement,
+   distributable-file list, and NVIDIA's third-party notices. Distribution and
+   use are subject to those terms; the CUDA files are included as runtime
+   dependencies of this application, not as a standalone CUDA toolkit.
+   Sources:
+   https://docs.nvidia.com/cuda/archive/12.8.0/eula/index.html
+   https://docs.nvidia.com/cuda/archive/13.0.0/eula/index.html
+
+5. Microsoft Visual C++ runtime components
+   Copyright Microsoft Corporation. Proprietary Microsoft license terms apply
+   to the Microsoft runtime DLLs supplied with Python and Ollama. Ollama's
+   vcruntime140.dll and msvcp140.dll identify version 14.44.35211.0.
+   Files: MICROSOFT-VC-RUNTIME-2015-2022-LICENSE.docx and the accompanying .txt
+   paragraph extraction. Python's additional Windows conditions are retained
+   in PYTHON-3.15.0-LICENSE.txt and runtime/python/LICENSE.txt.
+   The runtime end-user license is not itself a redistribution grant.
+   Microsoft's redistribution conditions and eligible distributable files are
+   documented separately at:
+   https://learn.microsoft.com/en-us/cpp/windows/redistributing-visual-cpp-files?view=msvc-170
+   https://learn.microsoft.com/en-us/visualstudio/releases/2022/redistribution
+   Runtime license source:
+   https://visualstudio.microsoft.com/license-terms/vs2022-cruntime/
+
+SOURCES.json records the exact source or original bundled location and SHA-256
+digest for each license file collected here. No third-party trademark is used
+to imply endorsement of Local Agent.

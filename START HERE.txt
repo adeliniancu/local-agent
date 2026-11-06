@@ -1,0 +1,110 @@
+LOCAL AGENT
+Your own local desktop assistant for files, coding, and terminal commands.
+
+OPEN IT
+
+1. Extract the ENTIRE ZIP into a folder you can write to.
+   Do not run the app from inside the ZIP preview.
+2. Double-click "Start Local Agent.cmd".
+3. If "Download model (3.3 GB)" appears, click it once and wait for the
+   download to finish. Packages that already include the model skip this step.
+4. Wait for "Local engine ready", then choose a working folder.
+5. Type a task and click Send, or press Enter.
+
+Python and Ollama are included. You do not need to install them separately,
+create an account, or provide an API key. Codex is not required. Once the
+model is downloaded, it runs on your computer and local chat works offline.
+Commands you approve can still use the internet, for example to install
+packages for a project.
+
+TRY THESE TASKS
+
+- "Look through this folder and explain the project."
+- "Create a Python temperature converter and test it."
+- "Find the cause of this error and fix the code."
+
+CHAT CONTROLS
+
+- Enter sends a message. Shift+Enter adds a new line. Ctrl+Enter also sends.
+- You can send another message while the agent works. It is marked queued
+  and is read before the agent's next step. It does not interrupt a response
+  already being generated.
+- If the agent asks a question, pick an option or type your own answer.
+  You can also answer in the main chat box. Skip pauses for your next message.
+- Reason more gives the same model extra time to think about a task.
+- Elapsed shows time spent on the current task, including waits for you.
+  Last generation tokens/s uses the model's reported generation speed;
+  it appears after a response has finished.
+- The agent can show a short plan and update its steps as it works.
+
+WHEN IT WORKS ON FILES
+
+The agent's file tools stay inside the folder you select. Before running
+a terminal command, it shows the exact command for your approval. You can
+allow a single command or allow commands for the rest of that chat.
+Commands run with your Windows account and can access other folders.
+
+Click Stop to cancel the current task and discard follow-ups still queued.
+Stop does not undo changes already made. File-tool overwrites keep copies
+in .localagent-backups inside the project. Changes made by terminal commands
+do not automatically get backups.
+
+The app saves your last chat automatically. New chat archives the previous
+conversation; use Saved chats to reopen it. A small local model may need
+clear, specific tasks and corrections. Review changes before relying on them.
+
+WORKING MEMORY
+
+The model has a finite working memory. When a conversation or task gets
+large, the agent summarizes older steps automatically so it can continue.
+"Working memory summarized" tells you when this has happened. Your full
+chat remains saved. The working summary keeps recent instructions and
+useful facts, but cannot retain every detail. The agent can look back at
+earlier messages when needed; you can also remind it of a critical detail.
+
+UPDATE THE APP
+
+Click Update when no task is running. The updater can check the configured
+GitHub release channel or install an update ZIP you received. Review the
+version, then install it. The app restarts after a successful update.
+App updates preserve your local models, chats, settings, and project files.
+Checking online or downloading an update needs an internet connection;
+ordinary local chat does not.
+
+COMPUTER REQUIREMENTS
+
+- 64-bit Windows 10 (22H2) or Windows 11.
+- 16 GB RAM is suggested; more memory helps with larger projects.
+- Enough free storage for the whole extracted package and your work.
+- An NVIDIA GPU is optional. Speed depends on the computer and other apps.
+
+If the normal launcher has GPU problems, close Local Agent and open
+"Start Local Agent (CPU).cmd". CPU mode uses system memory and is slower.
+Close games or other heavy apps if responses are slow or memory is low.
+The first reply may take longer while the model loads.
+
+The included Python can run Python programs. Other project tools, such as
+Node.js, Git, Java, compilers, and package dependencies, are not included.
+They need to be installed separately if your task requires them.
+
+KEEPING OR SHARING YOUR COPY
+
+Keep all files and folders together. You can move the whole extracted folder
+after closing the app and stopping its local engine. Do not share only the
+launcher: it needs the runtime and model files beside it.
+
+Use the original distribution ZIP when sharing with someone else. After you
+use the app, data contains your chats and settings, logs may contain task
+details, and workspace may contain your files. These are personal. Make a
+separate clean copy without your data, logs, or workspace contents before
+resharing a used installation. Keep the included licenses and notices.
+
+TROUBLESHOOTING
+
+- Missing files: extract the entire ZIP again.
+- Engine offline: use Refresh connection; check logs/ollama.log if needed.
+- Startup error: check logs/desktop.log.
+- If a project needs a missing tool, install that tool and reopen Local Agent.
+
+This is a local assistant, not a guarantee that every task will succeed.
+You control which project it works on and which terminal commands run.

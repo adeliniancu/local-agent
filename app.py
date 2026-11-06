@@ -1,0 +1,1071 @@
+"""Local Agent: a standalone, local-first desktop coding assistant."""
+from __future__ import annotations
+
+import copy
+from datetime import datetime
+import json
+import math
+import os
+from pathlib import Path
+import queue
+import sys
+import threading
+import time
+import tkinter as tk
+from tkinter import filedialog, messagebox, ttk
+
+ROOT = Path(__file__).resolve().parent
+DATA = ROOT / "data"
+STATE = DATA / "last-chat.json"
+DEFAULT_MODEL = "qwen3.5:4b-q4_K_M"
+try:
+    from version import __version__ as APP_VERSION
+except ImportError:
+    APP_VERSION = "2.0.0"
+COLORS = {
+    "bg": "#101619", "side": "#0b1114", "panel": "#182126",
+    "border": "#2a373d", "text": "#e8eeee", "muted": "#95a8ad",
+    "mint": "#9bdfc4", "mint_dark": "#254c40", "user": "#a9c9ef",
+    "error": "#f1a69e", "tool": "#c0b2df",
+}
+
+
+class LocalAgentApp:
+    def __init__(self, root: tk.Tk, *, start_engine: bool = True):
+        self.root = root
+        self.root.title("Local Agent")
+        self.root.geometry("1120x790")
+        self.root.minsize(840, 620)
+        self.root.configure(bg=COLORS["bg"])
+        self.events: queue.Queue = queue.Queue()
+        self.closing = False
+        self.busy = False
+        self.ready = False
+        self.connecting = False
+        self.downloading = False
+        self.updating = False
+        self.cancel = threading.Event()
+        self.allow_commands = threading.Event()
+        self.incoming: queue.Queue[str] = queue.Queue()
+        self.queued_count = 0
+        self.work_started: float | None = None
+        self.elapsed_seconds = 0.0
+        self.last_tokens_per_second: float | None = None
+        self.reason_more = False
+        self.memory_state: dict = {}
+        self.history: list[dict] = []
+        self.agent = None
+        self.worker = None
+        self.run_id = 0
+        self.stream_started = False
+        self.stream_text = ""
+        self.approval_window: tk.Toplevel | None = None
+        self.approval_request = None
+        self.question_window: tk.Toplevel | None = None
+        self.question_request = None
+        self.stream_mark: str | None = None
+        self.stream_start_mark: str | None = None
+        self.stream_end_mark: str | None = None
+        self.workspace = ROOT / "workspace"
+        self.workspace.mkdir(parents=True, exist_ok=True)
+        self.model_name = DEFAULT_MODEL
+        self._load_state()
+        self._style()
+        self._set_icon()
+        self._build()
+        self._render_history()
+        if not self.workspace.is_dir():
+            self.status_label.configure(text="Your previous folder is unavailable. Choose a folder before sending a task.")
+        self.root.protocol("WM_DELETE_WINDOW", self.close)
+        self.root.bind("<Control-Return>", self._send_key)
+        self.root.bind("<Escape>", lambda _event: self.stop() if self.busy else None)
+        self._poll_id = self.root.after(50, self._poll)
+        self._tick_id = self.root.after(250, self._tick)
+        if start_engine:
+            self.root.after(100, self.connect)
+
+    def _set_icon(self):
+        self.icon_photo = None
+        self.brand_photo = None
+        try:
+            import ctypes
+            ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("LocalAgent.Desktop")
+        except (AttributeError, OSError):
+            pass
+        try:
+            icon = ROOT / "assets" / "app.ico"
+            if icon.is_file():
+                self.root.iconbitmap(str(icon))
+            image = ROOT / "assets" / "app.png"
+            if image.is_file():
+                self.icon_photo = tk.PhotoImage(file=str(image))
+                self.root.iconphoto(True, self.icon_photo)
+            logo = ROOT / "assets" / "logo.png"
+            if logo.is_file():
+                photo = tk.PhotoImage(file=str(logo))
+                factor = max(1, math.ceil(max(photo.width(), photo.height()) / 40))
+                self.brand_photo = photo.subsample(factor)
+        except tk.TclError:
+            pass
+
+    def _style(self):
+        style = ttk.Style(self.root)
+        style.theme_use("clam")
+        style.configure("TCombobox", fieldbackground=COLORS["panel"],
+                        background=COLORS["panel"], foreground=COLORS["text"],
+                        arrowcolor=COLORS["muted"], bordercolor=COLORS["border"],
+                        lightcolor=COLORS["border"], darkcolor=COLORS["border"], padding=7)
+        style.map("TCombobox", fieldbackground=[("disabled", COLORS["side"])],
+                  foreground=[("disabled", COLORS["muted"])])
+        self.root.option_add("*TCombobox*Listbox.background", COLORS["panel"])
+        self.root.option_add("*TCombobox*Listbox.foreground", COLORS["text"])
+        style.configure("Vertical.TScrollbar", background=COLORS["border"],
+                        troughcolor=COLORS["bg"], borderwidth=0, arrowsize=12)
+
+    def _label(self, parent, text, *, size=10, color=None, bold=False, bg=None, **kwargs):
+        return tk.Label(parent, text=text, bg=bg or parent.cget("bg"),
+                        fg=color or COLORS["text"], font=("Segoe UI", size, "bold" if bold else "normal"),
+                        **kwargs)
+
+    def _button(self, parent, text, command, *, primary=False, **kwargs):
+        return tk.Button(parent, text=text, command=command, relief="flat", bd=0,
+                         bg=COLORS["mint"] if primary else COLORS["panel"],
+                         fg=COLORS["side"] if primary else COLORS["text"],
+                         activebackground="#b8ebd6" if primary else COLORS["border"],
+                         activeforeground=COLORS["side"] if primary else COLORS["text"],
+                         disabledforeground="#66777d", cursor="hand2", padx=14, pady=10,
+                         font=("Segoe UI", 10, "bold" if primary else "normal"), **kwargs)
+
+    def _build(self):
+        self.sidebar = tk.Frame(self.root, bg=COLORS["side"], width=238)
+        self.sidebar.pack(side="left", fill="y")
+        self.sidebar.pack_propagate(False)
+        # Reserve the footer first so it remains reachable at the minimum size.
+        bottom = tk.Frame(self.sidebar, bg=COLORS["side"])
+        bottom.pack(side="bottom", fill="x", padx=20, pady=(8, 12))
+        self.engine_label = self._label(bottom, "●  Starting local engine", size=9, color=COLORS["muted"], wraplength=190, justify="left")
+        self.engine_label.pack(anchor="w", pady=(0, 6))
+        footer_actions = tk.Frame(bottom, bg=COLORS["side"])
+        footer_actions.pack(fill="x")
+        self.retry_button = self._button(footer_actions, "Refresh", self.connect)
+        self.retry_button.configure(pady=7, padx=10)
+        self.retry_button.pack(side="left", fill="x", expand=True, padx=(0, 5))
+        self.update_button = self._button(footer_actions, "Update", self.open_update)
+        self.update_button.configure(pady=7, padx=10)
+        self.update_button.pack(side="left", fill="x", expand=True)
+        self._label(bottom, f"v{APP_VERSION} · Saved on this PC", size=8, color=COLORS["muted"]).pack(anchor="w", pady=(10, 0))
+        brand = tk.Frame(self.sidebar, bg=COLORS["side"])
+        brand.pack(fill="x", padx=20, pady=(20, 16))
+        if self.brand_photo is not None:
+            tk.Label(brand, image=self.brand_photo, bg=COLORS["side"]).pack(side="left", padx=(0, 9))
+        else:
+            self._label(brand, "◈", size=25, color=COLORS["mint"]).pack(side="left", padx=(0, 9))
+        brand_text = tk.Frame(brand, bg=COLORS["side"])
+        brand_text.pack(side="left")
+        self._label(brand_text, "Local Agent", size=16, bold=True).pack(anchor="w")
+        self._label(brand_text, "Your computer. Your assistant.", size=8, color=COLORS["muted"]).pack(anchor="w")
+        self.new_button = self._button(self.sidebar, "+  New chat", self.new_chat)
+        self.new_button.configure(pady=7)
+        self.new_button.pack(fill="x", padx=20)
+        self.saved_button = self._button(self.sidebar, "Saved chats", self.open_saved_chat)
+        self.saved_button.configure(pady=7)
+        self.saved_button.pack(fill="x", padx=20, pady=(6, 0))
+        self._label(self.sidebar, "WORKSPACE", size=8, bold=True, color=COLORS["muted"]).pack(anchor="w", padx=22, pady=(20, 7))
+        self.folder_title = self._label(self.sidebar, self._short_name(self.workspace), size=11, bold=True,
+                                        anchor="w", wraplength=190, justify="left")
+        self.folder_title.pack(fill="x", padx=22)
+        self.folder_path = self._label(self.sidebar, self._short_path(self.workspace), size=9, color=COLORS["muted"],
+                                       anchor="w", wraplength=190, justify="left")
+        self.folder_path.pack(fill="x", padx=22, pady=(5, 9))
+        self.folder_button = self._button(self.sidebar, "Choose folder", self.choose_folder)
+        self.folder_button.configure(pady=7)
+        self.folder_button.pack(fill="x", padx=20)
+        self.open_button = self._button(self.sidebar, "Open folder ↗", self.open_folder)
+        self.open_button.configure(pady=7)
+        self.open_button.pack(fill="x", padx=20, pady=(6, 0))
+        self._label(self.sidebar, "MODEL", size=8, bold=True, color=COLORS["muted"]).pack(anchor="w", padx=22, pady=(18, 7))
+        self.model_var = tk.StringVar(value=self.model_name)
+        self.model_box = ttk.Combobox(self.sidebar, textvariable=self.model_var, font=("Segoe UI", 9))
+        self.model_box.pack(fill="x", padx=20)
+        self.model_box.bind("<<ComboboxSelected>>", self._model_changed)
+        self.model_box.bind("<FocusOut>", self._model_changed)
+        self.think_var = tk.BooleanVar(value=self.reason_more)
+        self.think_box = tk.Checkbutton(self.sidebar, text="Reason more", variable=self.think_var,
+                       command=self._save_state, bg=COLORS["side"], fg=COLORS["text"],
+                       selectcolor=COLORS["panel"], activebackground=COLORS["side"],
+                       activeforeground=COLORS["text"], font=("Segoe UI", 9), bd=0)
+        self.think_box.pack(anchor="w", padx=19, pady=(8, 0))
+
+        main = tk.Frame(self.root, bg=COLORS["bg"])
+        main.pack(side="left", fill="both", expand=True)
+        header = tk.Frame(main, bg=COLORS["bg"])
+        header.pack(fill="x", padx=30, pady=(27, 18))
+        self._label(header, "Let's get to work.", size=19, bold=True).pack(side="left")
+        self._label(header, "LOCAL  /  PRIVATE", size=8, color=COLORS["mint"], bold=True).pack(side="right", pady=6)
+        tk.Frame(main, bg=COLORS["border"], height=1).pack(fill="x", padx=30)
+
+        self.setup_bar = tk.Frame(main, bg=COLORS["panel"], padx=12, pady=10)
+        self._label(self.setup_bar, "Download your local model\nonce to get started.", size=9,
+                    color=COLORS["muted"], justify="left").pack(side="left")
+        self.download_button = self._button(self.setup_bar, "Download model (3.3 GB)", self.download_model, primary=True)
+        self.download_button.pack(side="right", padx=(8, 0))
+
+        transcript_frame = tk.Frame(main, bg=COLORS["bg"])
+        self.transcript_frame = transcript_frame
+        transcript_frame.pack(fill="both", expand=True, padx=(27, 16), pady=(8, 0))
+        self.transcript = tk.Text(transcript_frame, wrap="word", height=1, width=1, bd=0, highlightthickness=0,
+                                  bg=COLORS["bg"], fg=COLORS["text"], insertbackground=COLORS["text"],
+                                  font=("Segoe UI", 11), padx=3, pady=12, spacing1=3, spacing3=4,
+                                  state="disabled", cursor="arrow", takefocus=True)
+        scrollbar = ttk.Scrollbar(transcript_frame, orient="vertical", command=self.transcript.yview)
+        self.transcript.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        self.transcript.pack(side="left", fill="both", expand=True)
+        for name, opts in {
+            "welcome_title": {"font": ("Segoe UI", 24, "bold"), "foreground": COLORS["text"], "spacing1": 35, "spacing3": 14},
+            "muted": {"foreground": COLORS["muted"]},
+            "user_role": {"foreground": COLORS["user"], "font": ("Segoe UI", 9, "bold"), "spacing1": 17},
+            "agent_role": {"foreground": COLORS["mint"], "font": ("Segoe UI", 9, "bold"), "spacing1": 17},
+            "tool_role": {"foreground": COLORS["tool"], "font": ("Segoe UI", 9, "bold"), "spacing1": 10},
+            "tool": {"foreground": COLORS["muted"], "font": ("Consolas", 9), "lmargin1": 12, "lmargin2": 12},
+            "error": {"foreground": COLORS["error"], "spacing1": 9},
+            "body": {"foreground": COLORS["text"], "spacing3": 9},
+        }.items():
+            self.transcript.tag_configure(name, **opts)
+
+        self.status_label = self._label(main, "Choose a folder, then tell your agent what to do.", size=9, color=COLORS["muted"], anchor="w")
+        self.status_label.pack(fill="x", padx=31, pady=(5, 2))
+        self.metrics_label = self._label(main, "Elapsed 00:00 · Last generation — tokens/s", size=8, color=COLORS["muted"], anchor="w")
+        self.metrics_label.pack(fill="x", padx=31, pady=(0, 8))
+        self.memory_label = self._label(main, "Working memory summarized · Full chat saved", size=8,
+                                        color=COLORS["mint"], anchor="w")
+        composer_border = tk.Frame(main, bg=COLORS["border"], padx=1, pady=1)
+        self.composer_border = composer_border
+        composer_border.pack(fill="x", padx=30)
+        composer = tk.Frame(composer_border, bg=COLORS["panel"])
+        composer.pack(fill="x")
+        self.input = tk.Text(composer, height=3, wrap="word", bd=0, highlightthickness=0,
+                             bg=COLORS["panel"], fg=COLORS["text"], insertbackground=COLORS["mint"],
+                             font=("Segoe UI", 11), padx=13, pady=12, undo=True)
+        self.input.pack(fill="x")
+        self.input.bind("<Return>", self._send_key)
+        self.input.bind("<Shift-Return>", self._newline_key)
+        self.input.bind("<Control-Return>", self._send_key)
+        composer_actions = tk.Frame(composer, bg=COLORS["panel"])
+        composer_actions.pack(fill="x", padx=12, pady=(0, 10))
+        self._label(composer_actions, "Enter to send · Shift+Enter for a new line", size=8, color=COLORS["muted"]).pack(side="left")
+        self.send_button = self._button(composer_actions, "Send  ↑", self.send, primary=True, state="disabled")
+        self.send_button.pack(side="right")
+        self.stop_button = self._button(composer_actions, "Stop", self.stop, state="disabled")
+        self.stop_button.pack(side="right", padx=(0, 8))
+        self._label(main, "Files · Code · Terminal", size=8, color=COLORS["muted"]).pack(pady=(10, 16))
+        self._refresh_memory_indicator()
+        self.input.focus_set()
+
+    def _append(self, text, tag="body"):
+        self.transcript.configure(state="normal")
+        self.transcript.insert("end", text, tag)
+        self.transcript.configure(state="disabled")
+        self.transcript.see("end")
+
+    @staticmethod
+    def _short_path(path):
+        text = str(path)
+        return text if len(text) <= 62 else "…" + text[-61:]
+
+    @staticmethod
+    def _short_name(path):
+        text = Path(path).name or str(path)
+        return text if len(text) <= 36 else text[:35] + "…"
+
+    def _refresh_memory_indicator(self):
+        if self.memory_state:
+            self.memory_label.pack(fill="x", padx=31, pady=(0, 8), before=self.composer_border)
+        else:
+            self.memory_label.pack_forget()
+
+    @staticmethod
+    def _clean_memory_state(value):
+        if not isinstance(value, dict):
+            return {}
+        count = value.get("compactions")
+        if not isinstance(count, int) or isinstance(count, bool) or count <= 0:
+            return {}
+        covered = value.get("covered_messages", 0)
+        return {"compactions": count, "covered_messages": covered if isinstance(covered, int) and covered >= 0 else 0}
+
+    @classmethod
+    def _history_memory_state(cls, history):
+        for message in history:
+            if message.get("role") == "system":
+                marker = message.get("_local_agent_context")
+                if isinstance(marker, dict) and marker.get("schema") == 1:
+                    return cls._clean_memory_state(marker)
+        return {}
+
+    def _can_send(self):
+        return self.ready and not self.updating and not self.closing and self.workspace.is_dir() and not (self.busy and self.cancel.is_set())
+
+    def _tick(self):
+        if self.closing:
+            return
+        elapsed = self.elapsed_seconds
+        if self.busy and self.work_started is not None:
+            elapsed = time.monotonic() - self.work_started
+        seconds = max(0, int(elapsed))
+        clock = f"{seconds // 60:02d}:{seconds % 60:02d}" if seconds < 3600 else f"{seconds // 3600:02d}:{seconds // 60 % 60:02d}:{seconds % 60:02d}"
+        speed = "—" if self.last_tokens_per_second is None else f"{self.last_tokens_per_second:.1f}"
+        queued = f" · {self.queued_count} queued" if self.queued_count else ""
+        self.metrics_label.configure(text=f"Elapsed {clock} · Last generation {speed} tokens/s{queued}")
+        self._tick_id = self.root.after(250, self._tick)
+
+    def open_update(self):
+        if self.busy or self.connecting or self.downloading or self.updating or self.closing:
+            return
+        try:
+            import updater
+            self.updating = True
+            self.send_button.configure(state="disabled")
+            self.update_button.configure(state="disabled")
+            self.retry_button.configure(state="disabled")
+            dialog = updater.open_update_dialog(self.root)
+
+            def finished(event):
+                if event.widget is dialog and not self.closing and self.update_button.winfo_exists():
+                    self.updating = False
+                    self.update_button.configure(state="normal")
+                    self.retry_button.configure(state="normal")
+                    self.send_button.configure(state="normal" if self._can_send() else "disabled")
+            dialog.bind("<Destroy>", finished, add=True)
+        except Exception as exc:
+            self.updating = False
+            self.update_button.configure(state="normal")
+            self.retry_button.configure(state="normal")
+            self.send_button.configure(state="normal" if self._can_send() else "disabled")
+            messagebox.showerror("Couldn't open updater", str(exc), parent=self.root)
+
+    def download_model(self):
+        if self.downloading or self.connecting or self.updating or self.busy or self.closing:
+            return
+        self.downloading = True
+        self.download_button.configure(state="disabled", text="Downloading…")
+        self.retry_button.configure(state="disabled")
+        self.update_button.configure(state="disabled")
+        self.status_label.configure(text="Downloading the local model. You can keep this window open.")
+
+        def worker():
+            try:
+                import runtime
+                runtime.pull_model(progress=lambda event: self.events.put(("model_download_status", event, None)))
+                self.events.put(("model_download_complete", {}, None))
+            except Exception as exc:
+                self.events.put(("model_download_error", {"text": str(exc)}, None))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _render_history(self):
+        self.transcript.configure(state="normal")
+        self.transcript.delete("1.0", "end")
+        self.transcript.configure(state="disabled")
+        visible = [m for m in self.history if m.get("role") in ("user", "assistant") and m.get("content")]
+        if not visible:
+            self._append("A little help.\nA lot done.\n", "welcome_title")
+            self._append("Ask your agent to explore a project, write code,\nfix a problem, or run a command.\n\n", "muted")
+            self._append("TRY A TASK\n", "agent_role")
+            self._append("“Look through this folder and explain the project.”\n", "body")
+            self._append("“Create a small Python app and test it.”\n", "body")
+            self._append("“Find the cause of this error and fix it.”\n\n", "body")
+            self._append("Your selected folder is the starting point.\nYou'll see file actions and command results here.", "muted")
+        else:
+            for message in self.history:
+                if message.get("role") in ("user", "assistant") and message.get("content"):
+                    is_user = message["role"] == "user"
+                    self._append("YOU\n" if is_user else "LOCAL AGENT\n", "user_role" if is_user else "agent_role")
+                    self._append(str(message["content"]) + "\n\n")
+                for call in message.get("tool_calls", []):
+                    function = call.get("function", {})
+                    if function.get("name") == "ask_user":
+                        arguments = function.get("arguments", {})
+                        if isinstance(arguments, dict) and arguments.get("question"):
+                            self._append("QUESTION FOR YOU\n", "agent_role")
+                            self._append(str(arguments["question"]) + "\n\n")
+                if message.get("role") == "tool" and message.get("tool_name") == "ask_user":
+                    try:
+                        result = json.loads(message.get("content", "{}"))
+                        if result.get("answer"):
+                            self._append("YOU · ANSWER\n", "user_role")
+                            self._append(str(result["answer"]) + "\n\n")
+                    except (ValueError, TypeError, AttributeError):
+                        pass
+
+    def _load_state(self):
+        try:
+            saved = json.loads(STATE.read_text(encoding="utf-8"))
+            workspace = Path(saved.get("workspace", str(self.workspace)))
+            self.workspace = workspace.resolve()
+            # A moved/deleted project must not erase its saved conversation or
+            # silently attach it to a different working folder.
+            history = saved.get("history", [])
+            if isinstance(history, list) and all(isinstance(m, dict) for m in history):
+                self.history = history
+            self.model_name = str(saved.get("model") or DEFAULT_MODEL)
+            self.reason_more = bool(saved.get("reason_more", False))
+            if self.history:
+                self.memory_state = self._history_memory_state(self.history) or self._clean_memory_state(saved.get("memory_state"))
+        except (OSError, ValueError, TypeError):
+            pass
+
+    def _save_state(self):
+        try:
+            DATA.mkdir(parents=True, exist_ok=True)
+            target = STATE.with_suffix(".tmp")
+            target.write_text(json.dumps({"workspace": str(self.workspace), "model": self.model_var.get().strip() or DEFAULT_MODEL,
+                                          "reason_more": self.think_var.get(), "memory_state": self.memory_state,
+                                          "history": self.history}, ensure_ascii=False, indent=2), encoding="utf-8")
+            target.replace(STATE)
+        except OSError as exc:
+            self.status_label.configure(text=f"Could not save chat: {exc}")
+
+    def _model_changed(self, _event=None):
+        if not self.busy:
+            self.model_name = self.model_var.get().strip() or DEFAULT_MODEL
+            self._save_state()
+
+    def new_chat(self):
+        if self.busy:
+            return
+        if not self._archive_history():
+            return
+        self.history = []
+        self.allow_commands.clear()
+        self.elapsed_seconds = 0.0
+        self.last_tokens_per_second = None
+        self.memory_state = {}
+        self._refresh_memory_indicator()
+        self._render_history()
+        self._save_state()
+        self.status_label.configure(text="New chat. What would you like to do?")
+        self.send_button.configure(state="normal" if self._can_send() else "disabled")
+        if not self.workspace.is_dir():
+            self.status_label.configure(text="Choose an existing folder before sending a task.")
+        self.input.focus_set()
+
+    def _archive_history(self):
+        if not self.history:
+            return True
+        try:
+            directory = DATA / "chats"
+            directory.mkdir(parents=True, exist_ok=True)
+            filename = datetime.now().strftime("%Y-%m-%d %H-%M-%S-%f") + ".json"
+            (directory / filename).write_text(json.dumps({"workspace": str(self.workspace),
+                "model": self.model_var.get().strip() or DEFAULT_MODEL,
+                "memory_state": self.memory_state, "history": self.history},
+                ensure_ascii=False, indent=2), encoding="utf-8")
+            return True
+        except OSError as exc:
+            messagebox.showerror("Couldn't save this chat", str(exc), parent=self.root)
+            return False
+
+    def open_saved_chat(self):
+        if self.busy:
+            return
+        directory = DATA / "chats"
+        directory.mkdir(parents=True, exist_ok=True)
+        filename = filedialog.askopenfilename(parent=self.root, title="Open a saved chat", initialdir=str(directory),
+                                               filetypes=[("Saved chats", "*.json")])
+        if not filename:
+            return
+        try:
+            saved = json.loads(Path(filename).read_text(encoding="utf-8"))
+            workspace = Path(saved["workspace"]).resolve()
+            history = saved["history"]
+            if not isinstance(history, list) or not all(isinstance(m, dict) for m in history):
+                raise ValueError("This file doesn't contain a saved chat.")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            messagebox.showerror("Couldn't open chat", str(exc), parent=self.root)
+            return
+        if not self._archive_history():
+            return
+        self.workspace = workspace
+        self.history = history
+        self.memory_state = self._history_memory_state(history) or self._clean_memory_state(saved.get("memory_state"))
+        self._refresh_memory_indicator()
+        self.allow_commands.clear()
+        self.model_var.set(str(saved.get("model") or DEFAULT_MODEL))
+        self.folder_title.configure(text=self._short_name(workspace))
+        self.folder_path.configure(text=self._short_path(workspace))
+        self._render_history()
+        self._save_state()
+        self.send_button.configure(state="normal" if self._can_send() else "disabled")
+        self.status_label.configure(text="Saved chat opened. You can continue the conversation." if workspace.is_dir()
+                                    else "Chat restored. Its folder is unavailable; choose a folder before sending a task.")
+
+    def choose_folder(self):
+        if self.busy:
+            return
+        path = filedialog.askdirectory(parent=self.root, initialdir=str(self.workspace), title="Choose your agent's working folder", mustexist=True)
+        if path:
+            selected = Path(path).resolve()
+            if selected != self.workspace:
+                if not self._archive_history():
+                    return
+                self.history = []
+                self.workspace = selected
+                self.folder_title.configure(text=self._short_name(selected))
+                self.folder_path.configure(text=self._short_path(selected))
+                self.new_chat()
+                self.status_label.configure(text=f"Ready to work in {selected.name}.")
+
+    def open_folder(self):
+        try:
+            os.startfile(str(self.workspace))
+        except OSError as exc:
+            messagebox.showerror("Could not open folder", str(exc), parent=self.root)
+
+    def connect(self):
+        if self.connecting or self.busy or self.downloading or self.updating or self.closing:
+            return
+        self.connecting = True
+        self.ready = False
+        self.send_button.configure(state="disabled")
+        self.retry_button.configure(state="disabled")
+        self.update_button.configure(state="disabled")
+        self.engine_label.configure(text="●  Starting local engine", fg=COLORS["muted"])
+        self.status_label.configure(text="Connecting to your local model…")
+
+        def worker():
+            try:
+                import runtime
+                base_url = runtime.ensure_server()
+                models = runtime.list_models()
+                self.events.put(("connected", {"base_url": base_url, "models": models}, None))
+            except Exception as exc:
+                self.events.put(("connection_error", {"text": str(exc)}, None))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _set_busy(self, busy):
+        self.busy = busy
+        for widget in (self.new_button, self.saved_button, self.folder_button, self.retry_button, self.update_button):
+            widget.configure(state="disabled" if busy else "normal")
+        self.model_box.configure(state="disabled" if busy else "normal")
+        self.think_box.configure(state="disabled" if busy else "normal")
+        self.send_button.configure(state="normal" if self._can_send() else "disabled", text="Send follow-up" if busy else "Send  ↑")
+        self.stop_button.configure(state="normal" if busy else "disabled")
+        self.input.configure(state="normal")
+
+    def _send_key(self, _event):
+        self.send()
+        return "break"
+
+    def _newline_key(self, _event):
+        self.input.insert("insert", "\n")
+        return "break"
+
+    def _drain_incoming(self):
+        messages = []
+        while True:
+            try:
+                messages.append(self.incoming.get_nowait())
+            except queue.Empty:
+                return messages
+
+    def send(self):
+        if not self.ready or self.updating or self.closing:
+            return
+        if not self.workspace.is_dir():
+            self.status_label.configure(text="Your previous folder is unavailable. Choose a folder before sending a task.")
+            return
+        prompt = self.input.get("1.0", "end-1c").strip()
+        model = self.model_var.get().strip()
+        if not prompt:
+            return
+        if not model:
+            self.status_label.configure(text="Choose a local model first.")
+            return
+        if self.busy:
+            if self.cancel.is_set():
+                self.status_label.configure(text="Wait for the task to stop, then send your next message.")
+                return
+            self.input.delete("1.0", "end")
+            if self.question_request is not None:
+                self._answer_question(prompt)
+                return
+            self.incoming.put(prompt)
+            self.queued_count += 1
+            self._append("YOU · QUEUED\n", "user_role")
+            self._append(prompt + "\n\n")
+            self.status_label.configure(text="Message queued. Your agent will read it before its next step.")
+            return
+        if not self.history:
+            self.transcript.configure(state="normal")
+            self.transcript.delete("1.0", "end")
+            self.transcript.configure(state="disabled")
+        self._append("YOU\n", "user_role")
+        self._append(prompt + "\n\n")
+        self.input.delete("1.0", "end")
+        self._start_run(prompt)
+
+    def _start_run(self, prompt, *, continuation=False):
+        self.cancel = threading.Event()
+        self.run_id += 1
+        run_id = self.run_id
+        history = copy.deepcopy(self.history)
+        self.stream_started = False
+        self.stream_text = ""
+        self.stream_mark = None
+        self.stream_start_mark = None
+        self.stream_end_mark = None
+        if not continuation or self.work_started is None:
+            self.work_started = time.monotonic()
+            self.elapsed_seconds = 0.0
+            self.last_tokens_per_second = None
+        model = self.model_var.get().strip()
+        think = bool(self.think_var.get())
+        workspace = str(self.workspace)
+        base_url = self.base_url
+        cancel = self.cancel
+        incoming = self.incoming
+        self._set_busy(True)
+        self.status_label.configure(text="Working on your task…")
+
+        def emit(event, payload):
+            self.events.put((event, payload, run_id))
+
+        def approve(command, cwd):
+            if cancel.is_set() or self.closing:
+                return False
+            if self.allow_commands.is_set():
+                return True
+            request = {"command": command, "cwd": cwd, "event": threading.Event(), "allowed": False}
+            emit("approval", request)
+            while not request["event"].wait(0.1):
+                if cancel.is_set() or self.closing:
+                    return False
+            return bool(request["allowed"]) and not cancel.is_set()
+
+        def ask_user(question, options):
+            if cancel.is_set() or self.closing:
+                return None
+            request = {"question": str(question), "options": list(options or []),
+                       "event": threading.Event(), "answer": None}
+            emit("question", request)
+            while not request["event"].wait(0.1):
+                if cancel.is_set() or self.closing:
+                    return None
+            return request["answer"] if not cancel.is_set() else None
+
+        def poll_messages():
+            messages = []
+            if cancel.is_set() or self.closing:
+                return messages
+            while True:
+                try:
+                    messages.append(incoming.get_nowait())
+                except queue.Empty:
+                    return messages
+
+        def worker():
+            final_history = history
+            try:
+                from agent_core import Agent
+                agent = Agent(workspace, emit, approve, cancel, model=model, base_url=base_url,
+                              ask_user=ask_user, poll_messages=poll_messages, think=think)
+                self.agent = agent
+                agent.history = history
+                agent.run(prompt)
+                final_history = agent.history
+            except Exception as exc:
+                emit("error", {"text": str(exc)})
+                if self.agent is not None:
+                    final_history = self.agent.history
+            finally:
+                emit("worker_complete", {"history": final_history})
+        self.agent = None
+        self.worker = threading.Thread(target=worker, daemon=True)
+        self.worker.start()
+
+    def stop(self):
+        if not self.busy:
+            return
+        self.cancel.set()
+        self._answer_approval(False)
+        self._answer_question(None)
+        dropped = self._drain_incoming()
+        self.queued_count = 0
+        if dropped:
+            self._append(f"Stopped: {len(dropped)} queued message(s) were not sent to the agent.\n\n", "muted")
+        self.stop_button.configure(state="disabled")
+        self.send_button.configure(state="disabled")
+        self.status_label.configure(text="Stopping…")
+
+    def _show_approval(self, request):
+        if self.cancel.is_set() or self.closing:
+            request["event"].set()
+            return
+        self.approval_request = request
+        dialog = tk.Toplevel(self.root)
+        self.approval_window = dialog
+        dialog.title("Run this command?")
+        dialog.configure(bg=COLORS["bg"])
+        dialog.transient(self.root)
+        dialog.geometry("690x420")
+        dialog.minsize(550, 360)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: self._answer_approval(False))
+        content = tk.Frame(dialog, bg=COLORS["bg"])
+        content.pack(fill="both", expand=True, padx=24, pady=22)
+        self._label(content, "Run this command?", size=18, bold=True).pack(anchor="w")
+        self._label(content, str(request["cwd"]), size=9, color=COLORS["muted"], wraplength=620, justify="left").pack(anchor="w", pady=(5, 15))
+        command_box = tk.Text(content, height=6, wrap="word", relief="flat", bg=COLORS["panel"], fg=COLORS["text"],
+                              font=("Consolas", 10), padx=12, pady=12)
+        command_box.insert("1.0", request["command"])
+        command_box.configure(state="disabled")
+        command_box.pack(fill="both", expand=True)
+        self._label(content, "Commands run with your Windows account and can access files outside the selected folder.",
+                    size=9, color=COLORS["muted"], wraplength=620, justify="left").pack(anchor="w", pady=(12, 9))
+        allow_chat = tk.BooleanVar(value=False)
+        tk.Checkbutton(content, text="Allow commands for the rest of this chat", variable=allow_chat,
+                       bg=COLORS["bg"], fg=COLORS["text"], selectcolor=COLORS["panel"],
+                       activebackground=COLORS["bg"], activeforeground=COLORS["text"],
+                       font=("Segoe UI", 10)).pack(anchor="w")
+        buttons = tk.Frame(content, bg=COLORS["bg"])
+        buttons.pack(fill="x", pady=(12, 0))
+        self._button(buttons, "Allow", lambda: self._answer_approval(True, allow_chat.get()), primary=True).pack(side="right")
+        self._button(buttons, "Reject", lambda: self._answer_approval(False)).pack(side="right", padx=8)
+        self.status_label.configure(text="Waiting for you to review a command.")
+        dialog.lift()
+        dialog.focus_set()
+
+    def _answer_approval(self, allowed, allow_chat=False):
+        request = self.approval_request
+        if request:
+            request["allowed"] = allowed
+            if allowed and allow_chat:
+                self.allow_commands.set()
+            request["event"].set()
+            self.approval_request = None
+        if self.approval_window:
+            self.approval_window.destroy()
+            self.approval_window = None
+
+    def _show_question(self, request):
+        if self.cancel.is_set() or self.closing:
+            request["event"].set()
+            return
+        self.question_request = request
+        self._append("QUESTION FOR YOU\n", "agent_role")
+        self._append(request["question"] + "\n\n")
+        dialog = tk.Toplevel(self.root)
+        self.question_window = dialog
+        dialog.title("Your agent has a question")
+        dialog.configure(bg=COLORS["bg"])
+        dialog.transient(self.root)
+        dialog.geometry("660x520")
+        dialog.minsize(560, 440)
+        dialog.protocol("WM_DELETE_WINDOW", lambda: self._answer_question(None))
+        content = tk.Frame(dialog, bg=COLORS["bg"])
+        content.pack(fill="both", expand=True, padx=24, pady=22)
+        self._label(content, "A question for you", size=18, bold=True).pack(anchor="w")
+        footer = tk.Frame(content, bg=COLORS["bg"])
+        footer.pack(side="bottom", fill="x", pady=(10, 0))
+        scroll_frame = tk.Frame(content, bg=COLORS["bg"])
+        scroll_frame.pack(fill="both", expand=True, pady=(12, 0))
+        canvas = tk.Canvas(scroll_frame, bg=COLORS["bg"], bd=0, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        scrollbar.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="both", expand=True)
+        choices = tk.Frame(canvas, bg=COLORS["bg"])
+        canvas_item = canvas.create_window((0, 0), window=choices, anchor="nw")
+        choices.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+
+        def resize_choices(event):
+            canvas.itemconfigure(canvas_item, width=event.width)
+            for child in choices.winfo_children():
+                child.configure(wraplength=max(280, event.width - 24))
+        canvas.bind("<Configure>", resize_choices)
+        self._label(choices, request["question"], size=11, wraplength=510, justify="left").pack(anchor="w", fill="x", pady=(0, 12))
+        selected = tk.StringVar(value="")
+        for option in request.get("options", [])[:6]:
+            tk.Radiobutton(choices, text=str(option), variable=selected, value=str(option),
+                           bg=COLORS["bg"], fg=COLORS["text"], activebackground=COLORS["bg"],
+                           activeforeground=COLORS["text"], selectcolor=COLORS["panel"],
+                           font=("Segoe UI", 10), wraplength=490, justify="left", anchor="w").pack(fill="x", pady=3)
+        self._label(footer, "Or write your own answer", size=9, color=COLORS["muted"]).pack(anchor="w", pady=(0, 6))
+        answer = tk.Text(footer, height=3, wrap="word", relief="flat", bd=0, bg=COLORS["panel"], fg=COLORS["text"],
+                         insertbackground=COLORS["mint"], font=("Segoe UI", 11), padx=10, pady=8)
+        answer.pack(fill="x")
+
+        def submit(_event=None):
+            text = answer.get("1.0", "end-1c").strip() or selected.get().strip()
+            if text:
+                self._answer_question(text)
+            return "break"
+        answer.bind("<Return>", submit)
+        answer.bind("<Shift-Return>", lambda _event: (answer.insert("insert", "\n"), "break")[1])
+        buttons = tk.Frame(footer, bg=COLORS["bg"])
+        buttons.pack(fill="x", pady=(16, 0))
+        self._button(buttons, "Send answer", submit, primary=True).pack(side="right")
+        self._button(buttons, "Skip", lambda: self._answer_question(None)).pack(side="right", padx=8)
+        self._label(footer, "You can also answer in the main chat box.", size=8, color=COLORS["muted"]).pack(anchor="w", pady=(10, 0))
+        self.send_button.configure(text="Send answer")
+        self.status_label.configure(text="Your agent is waiting for your answer.")
+        answer.focus_set()
+        dialog.lift()
+
+    def _answer_question(self, answer):
+        request = self.question_request
+        if request is not None:
+            text = str(answer).strip() if answer is not None else None
+            request["answer"] = text or None
+            request["event"].set()
+            self.question_request = None
+            if text:
+                self._append("YOU · ANSWER\n", "user_role")
+                self._append(text + "\n\n")
+                self.status_label.configure(text="Answer sent. Your agent is continuing.")
+            else:
+                self._append("Question skipped.\n\n", "muted")
+            self.send_button.configure(text="Send follow-up" if self.busy else "Send  ↑")
+        if self.question_window is not None:
+            self.question_window.destroy()
+            self.question_window = None
+
+    def _finish_stream(self):
+        for mark in (self.stream_mark, self.stream_start_mark, self.stream_end_mark):
+            if mark is not None:
+                self.transcript.mark_unset(mark)
+        self.stream_mark = None
+        self.stream_start_mark = None
+        self.stream_end_mark = None
+        self.stream_started = False
+        self.stream_text = ""
+
+    def _stream_token(self, text):
+        if not self.stream_started:
+            start = self.transcript.index("end-1c")
+            self._append("LOCAL AGENT\n", "agent_role")
+            self.transcript.configure(state="normal")
+            position = self.transcript.index("end-1c")
+            self.transcript.insert("end", "\n\n", "body")
+            self.stream_mark = f"stream_{self.run_id}"
+            self.stream_start_mark = f"stream_start_{self.run_id}"
+            self.stream_end_mark = f"stream_end_{self.run_id}"
+            self.transcript.mark_set(self.stream_mark, position)
+            self.transcript.mark_gravity(self.stream_mark, "right")
+            self.transcript.mark_set(self.stream_start_mark, start)
+            self.transcript.mark_gravity(self.stream_start_mark, "left")
+            self.transcript.mark_set(self.stream_end_mark, "end-1c")
+            self.transcript.mark_gravity(self.stream_end_mark, "left")
+            self.transcript.configure(state="disabled")
+            self.stream_started = True
+        self.stream_text += text
+        self.transcript.configure(state="normal")
+        self.transcript.insert(self.stream_mark, text, "body")
+        self.transcript.configure(state="disabled")
+        self.transcript.see("end")
+
+    def _discard_stream(self):
+        if self.stream_started and self.stream_start_mark and self.stream_end_mark:
+            self.transcript.configure(state="normal")
+            self.transcript.delete(self.stream_start_mark, self.stream_end_mark)
+            self.transcript.configure(state="disabled")
+        self._finish_stream()
+
+    def _handle_event(self, event, payload, run_id):
+        if run_id is not None and run_id != self.run_id:
+            return
+        if event == "connected":
+            self.connecting = False
+            self.base_url = payload["base_url"]
+            models = payload["models"]
+            self.model_box.configure(values=models)
+            self.ready = bool(models)
+            if self.model_var.get() not in models and models:
+                self.model_var.set(DEFAULT_MODEL if DEFAULT_MODEL in models else models[0])
+            self.engine_label.configure(text="●  Local engine ready" if models else "●  No local models installed",
+                                        fg=COLORS["mint"] if models else COLORS["error"])
+            self.retry_button.configure(state="normal")
+            self.update_button.configure(state="normal")
+            self.send_button.configure(state="normal" if self._can_send() else "disabled")
+            if models:
+                self.setup_bar.pack_forget()
+            else:
+                self.setup_bar.pack(fill="x", padx=30, pady=(12, 0), before=self.transcript_frame)
+            if models and not self.workspace.is_dir():
+                self.status_label.configure(text="Your previous folder is unavailable. Choose a folder before sending a task.")
+            else:
+                self.status_label.configure(text="Ready. Tell your agent what to do." if models else "Download the local model once, then you can work offline.")
+        elif event == "connection_error":
+            self.connecting = False
+            self.ready = False
+            self.engine_label.configure(text="●  Local engine offline", fg=COLORS["error"])
+            self.retry_button.configure(state="normal")
+            self.update_button.configure(state="normal")
+            self.status_label.configure(text="Couldn't connect. Use Refresh connection to try again.")
+            self._append("Connection: " + payload["text"] + "\n", "error")
+        elif event == "model_download_status":
+            total = payload.get("total", 0)
+            completed = payload.get("completed", 0)
+            progress = f" {min(100, int(100 * completed / total))}%" if total else ""
+            self.status_label.configure(text=f"{payload.get('status', 'Downloading model')}{progress}")
+            self.download_button.configure(text=f"Downloading{progress}…")
+        elif event == "model_download_complete":
+            self.downloading = False
+            self.download_button.configure(state="normal", text="Download model (3.3 GB)")
+            self.connect()
+        elif event == "model_download_error":
+            self.downloading = False
+            self.download_button.configure(state="normal", text="Retry model download")
+            self.retry_button.configure(state="normal")
+            self.update_button.configure(state="normal")
+            self.status_label.configure(text="The download stopped. Retry to continue.")
+            self._append(payload.get("text", "Model download failed.") + "\n\n", "error")
+        elif event == "status":
+            self.status_label.configure(text=payload.get("text", ""))
+        elif event == "token":
+            self._stream_token(payload.get("text", ""))
+        elif event == "stream_reset":
+            self._discard_stream()
+            self.status_label.configure(text=payload.get("text", "Retrying after memory compaction…"))
+        elif event == "metrics":
+            value = payload.get("tokens_per_second")
+            self.last_tokens_per_second = float(value) if isinstance(value, (int, float)) and math.isfinite(value) and value >= 0 else None
+        elif event == "memory":
+            previous = self.memory_state.get("compactions", 0)
+            count = payload.get("compactions", previous + 1)
+            count = count if isinstance(count, int) and count > 0 else previous + 1
+            first_notice = not self.memory_state or count > previous
+            covered = payload.get("covered_messages", 0)
+            self.memory_state = {"compactions": count,
+                                 "covered_messages": covered if isinstance(covered, int) and covered >= 0 else 0}
+            self._refresh_memory_indicator()
+            if first_notice:
+                self._append("Working memory summarized so the task can continue. Your full chat remains saved.\n\n", "muted")
+            self.status_label.configure(text="Working memory summarized. Continuing…")
+        elif event == "steering":
+            self.queued_count = max(0, self.queued_count - 1)
+            self.status_label.configure(text="Your follow-up message has reached the agent.")
+        elif event == "plan":
+            steps = payload.get("steps", [])
+            if steps:
+                self._append("PLAN\n", "tool_role")
+                symbols = {"completed": "✓", "done": "✓", "in_progress": "→", "pending": "○"}
+                for step in steps:
+                    self._append(f"{symbols.get(step.get('status'), '○')}  {step.get('text', '')}\n", "muted")
+                self._append("\n")
+        elif event == "assistant":
+            text = payload.get("text", "")
+            if not self.stream_started and text:
+                self._append("LOCAL AGENT\n", "agent_role")
+                self._append(text + "\n\n")
+            elif self.stream_started:
+                self._finish_stream()
+        elif event == "tool":
+            self._finish_stream()
+            name = payload.get("name", "tool")
+            arguments = payload.get("arguments", {})
+            labels = {"list_files": "LOOKING THROUGH FILES", "read_file": "READING FILE", "write_file": "WRITING FILE",
+                      "replace_text": "EDITING FILE", "search_files": "SEARCHING FILES", "run_command": "RUNNING COMMAND",
+                      "ask_user": "ASKING A QUESTION", "set_plan": "UPDATING THE PLAN"}
+            self._append(labels.get(name, name.upper()) + "\n", "tool_role")
+            if isinstance(arguments, dict):
+                preview = arguments.get("command") or arguments.get("path") or arguments.get("query") or arguments.get("question") or "."
+            else:
+                preview = str(arguments)
+            self._append(str(preview)[:1200] + "\n", "tool")
+        elif event == "tool_result":
+            result = payload.get("result", "")
+            if not isinstance(result, str):
+                result = json.dumps(result, ensure_ascii=False)
+            self._append(result[:1800] + ("\n[Output shortened in chat]" if len(result) > 1800 else "") + "\n\n", "tool")
+        elif event == "approval":
+            self._show_approval(payload)
+        elif event == "question":
+            self._show_question(payload)
+        elif event == "error":
+            self._finish_stream()
+            self._append(payload.get("text", "Something went wrong.") + "\n\n", "error")
+        elif event == "worker_complete":
+            self._finish_stream()
+            self._answer_approval(False)
+            self._answer_question(None)
+            self.history = payload.get("history", self.history)
+            pending = self._drain_incoming()
+            self.queued_count = 0
+            if pending and not self.cancel.is_set() and not self.closing:
+                self._save_state()
+                self._start_run("\n\n".join(pending), continuation=True)
+                return
+            if self.work_started is not None:
+                self.elapsed_seconds = time.monotonic() - self.work_started
+                self.work_started = None
+            self._set_busy(False)
+            self._save_state()
+            self.status_label.configure(text="Stopped. You can continue with another message." if self.cancel.is_set() else "Ready for your next message.")
+            self.input.focus_set()
+
+    def _poll(self):
+        if self.closing:
+            return
+        try:
+            for _ in range(150):
+                event, payload, run_id = self.events.get_nowait()
+                self._handle_event(event, payload, run_id)
+        except queue.Empty:
+            pass
+        self._poll_id = self.root.after(40, self._poll)
+
+    def close(self):
+        if self.closing:
+            return
+        self.closing = True
+        for callback_id in (self._poll_id, self._tick_id):
+            self.root.after_cancel(callback_id)
+        self.cancel.set()
+        self._answer_approval(False)
+        self._answer_question(None)
+        self._drain_incoming()
+        self.queued_count = 0
+        self.status_label.configure(text="Stopping the current task and saving your chat…")
+        for widget in (self.send_button, self.stop_button, self.new_button, self.saved_button,
+                       self.folder_button, self.retry_button, self.update_button, self.download_button):
+            widget.configure(state="disabled")
+        self.input.configure(state="disabled")
+        self.model_box.configure(state="disabled")
+        self._close_started = time.monotonic()
+        self._wait_for_close()
+
+    def _wait_for_close(self):
+        # Let the agent cancel HTTP reads and kill any running command's process
+        # tree before ending Python; its worker is deliberately a daemon.
+        if self.worker is not None and self.worker.is_alive() and time.monotonic() - self._close_started < 15:
+            self.root.after(100, self._wait_for_close)
+            return
+        if self.agent is not None:
+            self.history = copy.deepcopy(self.agent.history)
+        self._save_state()
+        self.root.destroy()
+
+
+def main():
+    try:
+        import ctypes
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (AttributeError, OSError):
+        pass
+    root = tk.Tk()
+    smoke = "--smoke-test" in sys.argv
+    if smoke:
+        root.withdraw()
+    app = LocalAgentApp(root, start_engine=not smoke)
+    if smoke:
+        root.update_idletasks()
+        root.update()
+        app.closing = True
+        root.destroy()
+        print("Desktop UI smoke test passed.")
+    else:
+        root.mainloop()
+
+
+if __name__ == "__main__":
+    main()
