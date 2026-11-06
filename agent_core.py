@@ -434,11 +434,16 @@ class Agent:
             self._command_failures.clear()
             return
         lines = str(result.get("output") or result.get("error") or "Command failed").strip().splitlines()
-        fingerprint = re.sub(r"\b\d+\b", "#", lines[-1] if lines else "Command failed")[:1000]
+        diagnostics = [line.strip() for line in lines if re.search(
+            r"(?:Error|Exception):|^(?:FAIL|ERROR):|^E\s+", line)]
+        # Test suites often end with the same 'FAILED (errors=1)' footer even
+        # after the previous bug was fixed. Compare the actual diagnostics.
+        evidence = "\n".join(diagnostics[-8:]) if diagnostics else (lines[-1] if lines else "Command failed")
+        fingerprint = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
         count = self._command_failures.get(fingerprint, 0) + 1
         self._command_failures[fingerprint] = count
         if count >= 2:
-            result["recovery_hint"] = "This error has repeated. Check the interpreter and dependencies, and change the approach instead of repeating installation attempts."
+            result["recovery_hint"] = "This error has repeated. Inspect the actual diagnostic and change the code or approach before running the same check again."
         if count >= 3:
             self._stuck = True
             result["paused"] = "The same command error occurred three times. Ask the user for direction before continuing."

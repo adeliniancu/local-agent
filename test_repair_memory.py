@@ -110,6 +110,14 @@ class RepairMemoryTests(unittest.TestCase):
         target.write_text("# changed\n" * 1000)
         self.assertIsNotNone(progress(0, 4000))
 
+    def test_different_test_failures_with_identical_footer_are_not_a_loop(self):
+        for diagnostic in ('AttributeError: no label', 'TclError: duplicate ID', 'AssertionError: expected dark theme'):
+            self.agent._record_command_result({'exit_code': 1, 'output': diagnostic + '\n\nRan 5 tests\nFAILED (errors=1)'})
+        self.assertFalse(self.agent._stuck)
+        for _ in range(2):
+            self.agent._record_command_result({'exit_code': 1, 'output': 'AssertionError: expected dark theme\n\nRan 5 tests\nFAILED (errors=1)'})
+        self.assertTrue(self.agent._stuck)
+
     def test_launch_reports_startup_failure_and_respects_denial(self):
         (self.root / "bad.py").write_text("raise RuntimeError('startup-broken')\n")
         self.approve.return_value = False
