@@ -73,11 +73,13 @@ class RepairMemoryTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "partial read"):
             self.agent._write(target, "# replacement\n")
         self.agent._read_file(target, 4000)
-        self.assertTrue(self.agent._file_versions[target]["complete"])
+        self.agent._write(target, "# replacement\n")
+        self.assertEqual(target.read_text(), "# replacement\n")
         # Reading a page after an external edit must reset previous coverage.
         target.write_text("# changed!\n" * 1000)
         self.agent._read_file(target, 4000)
-        self.assertFalse(self.agent._file_versions[target]["complete"])
+        with self.assertRaisesRegex(ValueError, "partial read"):
+            self.agent._write(target, "# replacement\n")
         self.agent._read_file(target, 0)
         self.agent._read_file(target, 8000)
         self.agent._write(target, "# replacement\n")
