@@ -920,8 +920,15 @@ class Agent:
                     "An earlier assistant response was cut off at its output limit. No tools from that response were executed. "
                     "The incomplete draft is saved in read_working_history; continue from the last completed result."}
         if not item.get("attachments"):
-            return {key: value for key, value in item.items() if key in {"role", "content", "tool_calls", "tool_name", "thinking"}}
+            result = {key: value for key, value in item.items() if key in {"role", "content", "tool_calls", "tool_name", "thinking"}}
+            if "qwen3.5" in self.model.casefold():
+                # Qwen3.5's model card requires final outputs only in multi-turn
+                # history. Keep reasoning on disk, but do not replay old drafts.
+                result.pop("thinking", None)
+            return result
         result = runtime.model_message(item, vision_supported=bool(self.vision_supported), include_images=False)
+        if "qwen3.5" in self.model.casefold():
+            result.pop("thinking", None)
         if self._image_refs(item) and not item.get("_images_processed") and self.vision_supported:
             result["content"] = str(item.get("content", "")) + "\n[Visual input is not included in this response yet. Do not infer unseen content; use read_attachment with the image id to request reinspection.]"
         return result
