@@ -191,31 +191,36 @@ with zipfile.ZipFile(io.BytesIO(next(iter(uploaded.values())))) as bundle:
         rows[name] = [json.loads(line) for line in payload.decode("utf-8").splitlines()]
 assert manifest["status"] == "NOT_TRAINED"
 print({"training_examples": len(rows["train.jsonl"]), "validation_examples": len(rows["validation.jsonl"]), "status": "NOT_TRAINED"})
-'''), cell("code", f'''from unsloth import FastLanguageModel
+'''), cell("code", f'''from unsloth import FastVisionModel
 import torch
 assert torch.cuda.is_available(), "Select a GPU runtime"
 assert torch.cuda.get_device_properties(0).total_memory >= 10 * 1024**3, "Published bf16 4B requirement is about 10 GB; do not switch silently to 4-bit"
 bf16_supported = torch.cuda.is_bf16_supported()
-model, tokenizer = FastLanguageModel.from_pretrained(
+model, processor = FastVisionModel.from_pretrained(
     model_name={MODEL!r}, revision={MODEL_REVISION!r}, max_seq_length=4096,
     dtype=torch.bfloat16 if bf16_supported else torch.float16,
-    load_in_4bit=False, load_in_16bit=True, full_finetuning=False)
-model = FastLanguageModel.get_peft_model(
-    model, r=8, target_modules=["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"],
+    load_in_4bit=False, load_in_16bit=True, full_finetuning=False, text_only=False)
+model = FastVisionModel.get_peft_model(
+    model, r=8, finetune_vision_layers=False, finetune_language_layers=True,
+    finetune_attention_modules=True, finetune_mlp_modules=True,
     lora_alpha=16, lora_dropout=0, bias="none", use_gradient_checkpointing="unsloth", random_state=3407)
+assert any("visual" in name or "vision" in name for name, _ in model.named_parameters()), "Full vision model must be retained"
+assert not any(("visual" in name or "vision" in name) and parameter.requires_grad for name, parameter in model.named_parameters()), "Vision parameters must remain frozen"
+text_tokenizer = processor.tokenizer
+FastVisionModel.for_training(model)
 '''), cell("code", '''# Apply the exact model chat template, including tool schemas, before Dataset conversion.
 # This avoids mixed tool-argument dictionaries being flattened by Arrow.
 from datasets import Dataset
 def formatted(name):
     examples = []
     for row in rows[name]:
-        text = tokenizer.apply_chat_template(row["messages"], tools=row["tools"], tokenize=False, add_generation_prompt=False, enable_thinking=False)
-        assert len(tokenizer(text, add_special_tokens=False)["input_ids"]) <= 4096, "Example too long; do not silently truncate a tool result"
+        text = processor.apply_chat_template(row["messages"], tools=row["tools"], tokenize=False, add_generation_prompt=False, enable_thinking=False)
+        assert len(text_tokenizer(text, add_special_tokens=False)["input_ids"]) <= 4096, "Example too long; do not silently truncate a tool result"
         examples.append({"text": text})
     return Dataset.from_list(examples)
 train_data, validation_data = formatted("train.jsonl"), formatted("validation.jsonl")
 '''), cell("code", '''from trl import SFTTrainer, SFTConfig
-trainer = SFTTrainer(model=model, tokenizer=tokenizer, train_dataset=train_data, eval_dataset=validation_data,
+trainer = SFTTrainer(model=model, processing_class=text_tokenizer, train_dataset=train_data, eval_dataset=validation_data,
     args=SFTConfig(dataset_text_field="text", max_length=4096, packing=False,
         per_device_train_batch_size=1, per_device_eval_batch_size=1, gradient_accumulation_steps=4,
         bf16=bf16_supported, fp16=not bf16_supported,
@@ -225,14 +230,14 @@ result = trainer.train()
 print(trainer.evaluate())
 # Loss on this related validation split is not held-out coding-task success.
 model.save_pretrained("coding_adapter")
-tokenizer.save_pretrained("coding_adapter")
+processor.save_pretrained("coding_adapter")
 with open("training_status.json", "w") as output:
     json.dump({"status":"TRAINED_CANDIDATE_NOT_DEPLOYED", "heldout_evaluation":"NOT_RUN", "ollama_vision_compatibility":"NOT_VERIFIED", "training_metrics":result.metrics}, output, indent=2)
 '''), cell("code", '''# Optional export only after the adapter has passed the separate held-out benchmark.
 EXPORT_CANDIDATE = False
 if EXPORT_CANDIDATE:
-    model.save_pretrained_merged("candidate_bf16", tokenizer, save_method="merged_16bit")
-    model.save_pretrained_gguf("candidate_gguf", tokenizer, quantization_method="q4_k_m")
+    model.save_pretrained_merged("candidate_bf16", processor, save_method="merged_16bit")
+    model.save_pretrained_gguf("candidate_gguf", processor, quantization_method="q4_k_m")
 # For Qwen3.5 vision, verify matching projector export and chat/EOS/tool templates.
 # Re-run text, native tool-calling and image tests in the actual Ollama app.
 # Import under a new candidate name; preserve the original model for comparison.

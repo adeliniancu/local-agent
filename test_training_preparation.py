@@ -65,6 +65,11 @@ class TrainingPreparationTests(unittest.TestCase):
             self.assertIn("load_in_4bit=False", code)
             self.assertIn("EXPORT_CANDIDATE = False", code)
             self.assertIn(prep.MODEL_REVISION, code)
+            self.assertIn("processing_class=text_tokenizer", code)
+            self.assertNotIn("tokenizer=tokenizer", code)
+            self.assertIn("from unsloth import FastVisionModel", code)
+            self.assertIn("text_only=False", code)
+            self.assertIn("finetune_vision_layers=False", code)
 
 
 if __name__ == "__main__":
