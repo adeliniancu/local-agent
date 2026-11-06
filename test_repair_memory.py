@@ -46,6 +46,25 @@ class RepairMemoryTests(unittest.TestCase):
             start = page["next_start"]
         self.assertEqual("".join(parts), original)
 
+    def test_related_source_pages_survive_together_after_compaction(self):
+        original = "# startup\n" + "x = 'first section'\n" * 230
+        original += "# actions\n" + "y = 'second section'\n" * 230
+        (self.root / "main.py").write_text(original, encoding="utf-8")
+        self.agent.history = [{"role": "user", "content": "Fix startup, then verify the task actions."}]
+        for _ in range(15):
+            self.agent.history += tool_group("list_files", {}, {"entries": "old exploration " * 400})
+        pages, start = [], 0
+        while start is not None:
+            page = self.agent._read_file(self.root / "main.py", start)
+            pages.append(page)
+            self.agent.history += tool_group("read_file", {"path": "main.py", "start": start}, page)
+            self.agent._messages()
+            start = page["next_start"]
+        messages = self.agent._messages(force_compact=True)
+        visible = [json.loads(item["content"]) for item in messages if item.get("tool_name") == "read_file"]
+        self.assertEqual([page["content"] for page in visible], [page["content"] for page in pages])
+        self.assertLessEqual(self.agent._request_size(messages), self.agent._context_budgets()[0])
+
     def test_launch_is_nonblocking_and_does_not_duplicate(self):
         (self.root / "app.py").write_text("import time\ntime.sleep(30)\n")
         first = self.agent._execute("launch_python_app", {"path": "app.py"})
