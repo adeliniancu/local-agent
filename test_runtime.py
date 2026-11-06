@@ -77,6 +77,14 @@ class ModelMetadataTests(unittest.TestCase):
     def setUp(self):
         runtime._model_info.cache_clear()
 
+    def test_qwen_coding_sampling_requires_reasoning_and_matching_family(self):
+        expected = {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
+                    "presence_penalty": 0.0, "repeat_penalty": 1.0}
+        self.assertEqual(runtime.get_generation_options("qwen3.5:4b-q4_K_M", True), expected)
+        for model, think in (("qwen3.5:4b-q4_K_M", False), ("qwen2.5-coder:7b", True),
+                             ("custom-local:4b", True)):
+            self.assertEqual(runtime.get_generation_options(model, think), {"temperature": 0.2})
+
     def test_model_name_rejects_cloud_shell_and_url_inputs(self):
         for name in ("model:cloud", "model:4b-cloud", "../model", "model\nPARAMETER x 1",
                      "https://host/model", "model; echo bad", "--help"):

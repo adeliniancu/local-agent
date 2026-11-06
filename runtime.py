@@ -167,6 +167,15 @@ def get_inference_options(model: str, profile: str = "auto") -> dict:
     return {"num_ctx": context, "num_gpu": -1 if hardware.get("gpus") else 0}
 
 
+def get_generation_options(model: str, think: bool) -> dict:
+    """Use Qwen3.5's published precise-coding settings in reasoning mode."""
+    family = model.casefold().rsplit("/", 1)[-1].split(":", 1)[0]
+    if family == "qwen3.5" and think:
+        return {"temperature": 0.6, "top_p": 0.95, "top_k": 20, "min_p": 0.0,
+                "presence_penalty": 0.0, "repeat_penalty": 1.0}
+    return {"temperature": 0.2}
+
+
 def import_gguf(model: str, path: str | Path, *, progress=None) -> None:
     """Import user-selected local GGUF weights through the bundled official CLI."""
     model = _validate_model_name(model)
