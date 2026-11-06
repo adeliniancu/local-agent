@@ -124,6 +124,7 @@ class Agent:
         self._launched_apps = {}
         self._progress_reads = {}
         self._response_recovery = False
+        self._applied_edits = {}
 
     def _check_cancelled(self):
         if self.cancel_event.is_set():
@@ -213,6 +214,12 @@ class Agent:
         if len(raw) > MAX_FILE_BYTES:
             raise ValueError("File exceeds the 1 MB edit limit. Use a focused terminal command.")
         self._require_current_read(target, raw)
+        patch_key = (str(target), hashlib.sha256(search.encode('utf-8')).hexdigest(),
+                     hashlib.sha256(replace.encode('utf-8')).hexdigest())
+        if self._applied_edits.get(patch_key) == hashlib.sha256(raw).hexdigest():
+            return {"path": str(target.relative_to(self.workspace)), "unchanged": True,
+                    "already_applied": True, "replacements": 0,
+                    "note": "This exact edit was already applied to the current file. No changes were written. Verify the result before editing again."}
         content = raw.decode("utf-8-sig")
         # read_file displays normalized newlines. Match that block against CRLF
         # when needed while keeping every untouched byte and the UTF-8 BOM.
@@ -230,6 +237,10 @@ class Agent:
         result = self._write(target, content.replace(matched, replacement, 1),
                              allow_partial=True, preserve_bom=raw.startswith(b"\xef\xbb\xbf"))
         result["replacements"] = 0 if result.get("unchanged") else 1
+        if not result.get("unchanged"):
+            if patch_key not in self._applied_edits and len(self._applied_edits) >= 32:
+                self._applied_edits.pop(next(iter(self._applied_edits)))
+            self._applied_edits[patch_key] = self._file_versions[target]["sha256"]
         return result
 
     def _write(self, path: Path, content: str, *, allow_partial=False, preserve_bom=False) -> dict:
@@ -621,6 +632,7 @@ class Agent:
                     message = {"role": "user", "content": text.strip() + "\n[" + failure + "]", "user_text": text.strip()}
                     self.emit("error", {"text": failure})
                 self.history.append(message)
+                self._applied_edits.clear()
                 self.emit("steering", {"text": text.strip()})
                 consumed += 1
         return consumed
@@ -1433,6 +1445,7 @@ class Agent:
         self._new_image_records = []
         self._request_image_record = None
         self._response_recovery = False
+        self._applied_edits.clear()
         response_recoveries = 0
         seen_progress: set[str] = set()
         idle_tools = 0
