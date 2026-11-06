@@ -31,8 +31,8 @@ NO_PROGRESS_WARNING = 4
 NO_PROGRESS_LIMIT = 8
 # Conservative byte budgets leave room for tools, template tokens and a response
 # in the 16K model window. Ollama remains the authority on its exact token count.
-CONTEXT_BUDGET_BYTES = 24_000
-COMPACT_TARGET_BYTES = 18_000
+CONTEXT_BUDGET_BYTES = 32_000
+COMPACT_TARGET_BYTES = 28_000
 CONTEXT_STATE = "_local_agent_context"
 BACKUP_DIR = ".localagent-backups"
 IGNORED_DIRS = {".localagent-runs", ".git", "node_modules", "__pycache__", ".venv", "venv", BACKUP_DIR}
@@ -758,6 +758,10 @@ class Agent:
     @staticmethod
     def _scaled_context_bytes(value, context):
         # Tool schemas are fixed overhead; scale the remaining conversation space.
+        # Keep the existing small-window safety margin. The extra space is for
+        # retaining several related source pages in the normal 16K window.
+        if context < 16384:
+            value = {32_000: 24_000, 28_000: 18_000}.get(value, value)
         budget = 4000 + int((value - 4000) * min(context, 16384) / 16384)
         # A supported 8K model with an image still needs the fixed tool schemas.
         # These are text-byte heuristics, not claimed exact token measurements.
@@ -1030,7 +1034,7 @@ class Agent:
                      self._scaled_context_bytes(12_000, self._context_window()) if reduced_mode else normal_target)
         target = min(limit - 100, target)
         summary_minimum = 600 if scale < 1 else 1800
-        summary_size = min(int((3500 if reduced_mode else 6400) * scale),
+        summary_size = min(int((2500 if reduced_mode else 2800) * scale),
                            max(summary_minimum, target - base_size - int(1500 * scale)))
         if groups:
             start, end, valid = groups[-1]
