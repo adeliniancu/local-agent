@@ -1179,10 +1179,11 @@ class Agent:
         inbox = queue.Queue()
         transport_sockets = []
         available_tools = self._available_tools()
+        effective_think = self.think and not self._response_recovery
         payload = json.dumps({"model": self.model, "messages": messages, "tools": available_tools,
-                              "stream": True, "think": self.think and not self._response_recovery, "keep_alive": "2m",
+                              "stream": True, "think": effective_think, "keep_alive": "2m",
                               "options": {**inference_options, "num_predict": min(4096, self._context_window() // 4),
-                                          "temperature": 0.2}}).encode("utf-8")
+                                          **runtime.get_generation_options(self.model, effective_think)}}).encode("utf-8")
 
         def fetch():
             try:
@@ -1443,7 +1444,6 @@ class Agent:
                     self.emit("continuation", {"steps": step, "automatic": True})
                 self.emit("status", {"text": "Thinking locally…" if step == 0 else "Checking the results…"})
                 message = self._chat()
-                self._mark_images_processed()
                 if message.get("_response_truncated"):
                     self.history.append(message)
                     self.emit("stream_reset", {"text": "The model response reached its limit; no incomplete actions were executed."})
@@ -1457,6 +1457,7 @@ class Agent:
                     self.emit("assistant", {"text": text})
                     continue
                 self._response_recovery = False
+                self._mark_images_processed()
                 message = self._normalize_tool_message(message)
                 self.history.append(message)
                 if message.get("content"):
