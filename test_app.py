@@ -53,6 +53,15 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.ui._newline_key(None), "break")
         self.assertEqual(self.ui.input.get("1.0", "end-1c"), "line one\n")
 
+    def test_reasoning_default_and_explicit_saved_choice(self):
+        self.assertTrue(self.ui.think_var.get())
+        app.STATE.write_text(json.dumps({"reason_more": False}), encoding="utf-8")
+        self.ui._load_state()
+        self.assertFalse(self.ui.reason_more)
+        app.STATE.write_text(json.dumps({}), encoding="utf-8")
+        self.ui._load_state()
+        self.assertTrue(self.ui.reason_more)
+
     def test_busy_send_is_queued_and_does_not_split_stream(self):
         self.ui._set_busy(True)
         self.ui._handle_event("token", {"text": "Hello "}, 0)
