@@ -251,7 +251,7 @@ def load_core(core_path: Path | None = None):
 
 def is_validation_command(command: str, workspace: Path, *, app_root: Path = ROOT) -> bool:
     """Recognize only fixed-test intentions; never evaluate or execute this text."""
-    if not isinstance(command, str) or not command.strip():
+    if not isinstance(command, str) or not command.strip() or len(command) > 16000:
         return False
     text = command.strip()
     # No expansions, pipelines, redirection, multiline input or command chains.
@@ -272,7 +272,10 @@ def is_validation_command(command: str, workspace: Path, *, app_root: Path = ROO
         elif any(char in location for char in ('"', "'", '&')):
             return False
         try:
-            if Path(location).resolve() != workspace.resolve():
+            target = Path(location)
+            if not target.is_absolute():
+                target = workspace / target
+            if target.resolve() != workspace.resolve():
                 return False
         except (OSError, ValueError):
             return False
@@ -303,13 +306,16 @@ def is_validation_command(command: str, workspace: Path, *, app_root: Path = ROO
         except (OSError, ValueError):
             return False
     arguments = tail.split()
-    if len(arguments) >= 2 and arguments[0].casefold() == '-m' and arguments[1].casefold() == 'unittest':
+    module_command = len(arguments) >= 2 and arguments[0].casefold() == '-m' and arguments[1].casefold() == 'unittest'
+    if module_command:
         arguments = arguments[2:]
     elif arguments[0].casefold() in {'fixed_tests.py', './fixed_tests.py', '.\\fixed_tests.py'}:
         arguments = arguments[1:]
     else:
         return False
     if any(arg not in {'-q', '-v', 'fixed_tests.py'} for arg in arguments):
+        return False
+    if not module_command and 'fixed_tests.py' in arguments:
         return False
     if len(arguments) > 2 or len(set(arguments)) != len(arguments):
         return False

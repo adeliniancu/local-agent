@@ -64,6 +64,7 @@ class CodingBenchmarkTests(unittest.TestCase):
             'python -m unittest fixed_tests.py -q', 'python fixed_tests.py',
             f'cd "{workspace}"; python -m unittest -q',
             f'cd {workspace}; python -m unittest -q',
+            'cd .; python -m unittest -q',
             f"Set-Location -LiteralPath '{workspace}'; python.exe -m unittest -v",
             f'"{sys.executable}" -m unittest -q',
             f'& "{interpreter}" -m unittest -q',
@@ -92,6 +93,7 @@ class CodingBenchmarkTests(unittest.TestCase):
             '$python -m unittest -q', 'python -m unittest -q\necho passed',
             '`python -m unittest -q', 'python -m unittest -q -v',
             'python -m unittest fixed_tests.py fixed_tests.py',
+            'python fixed_tests.py fixed_tests.py', 'cd ..; python -m unittest -q',
             str(self.root/'unapproved/python.exe')+' -m unittest -q',
         ]
         with patch.object(benchmark,'validate') as validate:
