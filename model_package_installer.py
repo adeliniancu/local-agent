@@ -52,7 +52,7 @@ def validate_manifest(value):
     required = {"schema", "model", "label", "files", "parameters", "renderer", "parser", "license_file", "quality", "experimental"}
     if not isinstance(value, dict) or not required <= value.keys():
         raise InstallError("Incomplete model manifest")
-    if value["schema"] != 1 or value["model"] != MODEL or value["experimental"] is not True:
+    if type(value["schema"]) is not int or value["schema"] != 1 or value["model"] != MODEL or value["experimental"] is not True:
         raise InstallError("This installer supports only the experimental trained 4B pilot")
     if value["renderer"] != "qwen3.5" or value["parser"] != "qwen3.5" or value["license_file"] != "LICENSE.txt":
         raise InstallError("Unexpected model format")
@@ -64,7 +64,8 @@ def validate_manifest(value):
             or any(type(v) not in (int, float) or not math.isfinite(v) for v in params.values())):
         raise InstallError("Unexpected model parameters")
     quality = value["quality"]
-    if quality != {"trained_passed": 1, "reference_passed": 2, "tasks": 3}:
+    if (not isinstance(quality, dict) or quality != {"trained_passed": 1, "reference_passed": 2, "tasks": 3}
+            or any(type(v) is not int for v in quality.values())):
         raise InstallError("Missing experimental quality disclosure")
     files = value["files"]
     if not isinstance(files, list) or len(files) != 2 or {f.get("name") for f in files if isinstance(f, dict)} != {"model.gguf", "mmproj.gguf"}:
@@ -246,14 +247,17 @@ def main():
     args = parser.parse_args()
     window = tk.Tk()
     window.title("Install experimental Local Agent model")
-    window.geometry("650x340")
-    window.resizable(False, False)
+    window.geometry("680x440")
+    window.minsize(650, 400)
     frame = ttk.Frame(window, padding=24)
     frame.pack(fill="both", expand=True)
     ttk.Label(frame, text="Experimental trained 4B pilot", font=("Segoe UI", 17, "bold")).pack(anchor="w")
-    ttk.Label(frame, text="This pilot passed 1 of 3 coding tasks; the untrained reference passed 2 of 3.\nIt is not a demonstrated improvement. Your original model stays available.\n\nDownloads up to 3.4 GB. Allow 8 GB of free disk space.\nNo Codex account, API key or payment is needed by this installer.", wraplength=595).pack(anchor="w", pady=(12, 14))
+    explanation = ttk.Label(frame, text="This pilot passed 1 of 3 coding tasks; the untrained reference passed 2 of 3.\nIt is not a demonstrated improvement. Your original model stays available.\n\nDownloads up to 3.4 GB. Allow 8 GB of free disk space.\nNo Codex account, API key or payment is needed by this installer.", wraplength=625)
+    explanation.pack(anchor="w", pady=(12, 14))
     status = tk.StringVar(value="Choose Install to download this optional model.")
-    ttk.Label(frame, textvariable=status, wraplength=595).pack(anchor="w")
+    status_label = ttk.Label(frame, textvariable=status, wraplength=625)
+    status_label.pack(anchor="w")
+    frame.bind("<Configure>", lambda event: [label.configure(wraplength=max(150, event.width - 48)) for label in (explanation, status_label)])
     bar = ttk.Progressbar(frame, mode="determinate")
     bar.pack(fill="x", pady=12)
     buttons = ttk.Frame(frame)
