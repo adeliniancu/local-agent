@@ -7,6 +7,7 @@ import tempfile
 import threading
 import time
 import tkinter as tk
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -500,6 +501,44 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.ui.pending_attachments, [item])
         self.assertEqual(self.ui.input.get("1.0", "end-1c"), "")
 
+    def test_plain_text_paste_keeps_position_while_clipboard_worker_finishes(self):
+        release = threading.Event()
+        def read_clipboard():
+            release.wait(2)
+            return []
+        with patch.object(self.root, "clipboard_get", return_value="pasted "), \
+             patch("runtime.clipboard_attachments", side_effect=read_clipboard):
+            self.ui._paste_input()
+            self.ui.input.insert("insert", "typed later")
+            release.set()
+            self.wait_for_attachments()
+        self.assertEqual(self.ui.input.get("1.0", "end-1c"), "pasted typed later")
+
+    def test_transcript_menu_copies_and_composer_menu_pastes(self):
+        event = SimpleNamespace(x_root=0, y_root=0)
+        with patch("app.tk.Menu") as menu_type, patch.object(self.ui.transcript, "event_generate") as generate:
+            menu = menu_type.return_value
+            self.ui._text_menu(event, self.ui.transcript)
+            commands = {call.kwargs["label"]: call.kwargs["command"] for call in menu.add_command.call_args_list}
+            commands["Copy"]()
+            generate.assert_called_once_with("<<Copy>>")
+            self.assertNotIn("Paste", commands)
+        with patch("app.tk.Menu") as menu_type, patch.object(self.ui, "_paste_input") as paste:
+            self.ui._text_menu(event, self.ui.input, editable=True)
+            commands = {call.kwargs["label"]: call.kwargs["command"] for call in menu_type.return_value.add_command.call_args_list}
+            commands["Paste"]()
+            paste.assert_called_once()
+
+    def test_unsupported_file_preparation_fails_inline_without_clearing_text(self):
+        source = self.data / "paper.pdf"
+        source.write_bytes(b"%PDF-test")
+        self.ui.input.insert("1.0", "Keep my message")
+        self.ui._prepare_attachments([str(source)])
+        self.wait_for_attachments()
+        self.assertFalse(self.ui.pending_attachments)
+        self.assertIn("PDF reading is not available", self.ui.transcript.get("1.0", "end"))
+        self.assertEqual(self.ui.input.get("1.0", "end-1c"), "Keep my message")
+
     def test_stored_chat_shows_original_prompt_and_missing_file_error(self):
         item = self.attachment(content="DO NOT DISPLAY THE EXPANDED FILE CONTENTS")
         self.ui.history = [runtime.build_user_message("Review this file", [item])]
@@ -523,6 +562,14 @@ class DesktopTests(unittest.TestCase):
             self.assertEqual(Path(command[0]).name.lower(), "notepad.exe")
             self.assertEqual(command[1], str(runtime.resolve_attachment_path(item)))
             startfile.assert_not_called()
+
+    def test_saved_image_label_cannot_execute_a_script_attachment(self):
+        item = self.attachment("pretend-image.ps1", "Write-Output test")
+        item["kind"] = "image"
+        with patch("app.os.startfile") as startfile:
+            self.ui._open_attachment(item)
+            startfile.assert_not_called()
+        self.assertIn("not an image", self.ui.status_label.cget("text"))
 
     def test_actual_image_normalization_and_inline_preview(self):
         source = self.data / "small.png"

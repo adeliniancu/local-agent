@@ -521,6 +521,8 @@ class LocalAgentApp:
             import runtime
             path = runtime.resolve_attachment_path(item)
             if item.get("kind") == "image":
+                if path.suffix.lower() not in {".png", ".jpg", ".jpeg", ".gif", ".bmp"}:
+                    raise ValueError("The stored file is not an image. Attach the original image again.")
                 os.startfile(str(path))
             elif item.get("kind") == "text":
                 notepad = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "notepad.exe"
