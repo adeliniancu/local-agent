@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager, nullcontext
 import hashlib
 import importlib.util
 import json
@@ -11,9 +12,11 @@ from pathlib import Path
 import queue
 import re
 import shutil
+import socket
 import subprocess
 import tempfile
 import threading
+import time
 import urllib.parse
 import urllib.request
 
@@ -190,13 +193,63 @@ def app_runtime(app_dir):
     return module
 
 
+def engine_environment(app_dir, port):
+    environment = os.environ.copy()
+    environment.pop("PYTHONHOME", None)
+    environment.pop("PYTHONPATH", None)
+    environment.update(OLLAMA_HOST=f"127.0.0.1:{port}", OLLAMA_MODELS=str(app_dir / "models"), OLLAMA_NO_CLOUD="1")
+    return environment
+
+
+@contextmanager
+def owned_engine(app_dir, runtime, cancel):
+    """Use our own server so another open app cannot redirect model installation."""
+    with socket.socket() as reservation:
+        reservation.bind(("127.0.0.1", 0))
+        port = reservation.getsockname()[1]
+    previous_port, previous_url = runtime.PORT, runtime.BASE_URL
+    runtime.PORT, runtime.BASE_URL = port, f"http://127.0.0.1:{port}"
+    process = None
+    try:
+        with tempfile.TemporaryFile() as log:
+            process = subprocess.Popen([str(app_dir / "runtime/ollama/ollama.exe"), "serve"],
+                cwd=app_dir, env=engine_environment(app_dir, port), stdin=subprocess.DEVNULL,
+                stdout=log, stderr=subprocess.STDOUT, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            for attempt in range(150):
+                check_cancel(cancel)
+                if process.poll() is not None:
+                    raise InstallError("The private model installer engine could not start. Update Local Agent and retry.")
+                try:
+                    runtime._get("/api/version", timeout=1)
+                    break
+                except (OSError, ValueError):
+                    time.sleep(0.2)
+            else:
+                raise InstallError("The private model installer engine did not start in time.")
+            yield
+    finally:
+        if process is not None and process.poll() is None:
+            process.terminate()
+            try:
+                process.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=10)
+        runtime.PORT, runtime.BASE_URL = previous_port, previous_url
+
+
 def install_model(app_dir, manifest, license_path, cancel, notify, *, runtime_module=None, opener=open_download):
     app_dir, manifest = validate_app(app_dir), validate_manifest(manifest)
     license_text = Path(license_path).read_text(encoding="utf-8")
     if not license_text.strip() or len(license_text.encode()) > 65536 or '"""' in license_text:
         raise InstallError("Missing or invalid model license")
     runtime = runtime_module or app_runtime(app_dir)
-    runtime.ensure_server()
+    notify("status", "Starting a private local engine for the selected app folder…")
+    with nullcontext() if runtime_module is not None else owned_engine(app_dir, runtime, cancel):
+        _install_to_engine(app_dir, manifest, license_text, cancel, notify, runtime, opener)
+
+
+def _install_to_engine(app_dir, manifest, license_text, cancel, notify, runtime, opener):
     if MODEL in runtime.list_models():
         raise InstallError("The trained pilot is already installed. Click Refresh in Local Agent and select it.")
     engine = runtime._get("/api/version").get("version", "")
@@ -222,13 +275,9 @@ def install_model(app_dir, manifest, license_path, cancel, notify, *, runtime_mo
         lines += ['LICENSE """' + license_text + '"""']
         modelfile = folder / "Modelfile"
         modelfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        environment = os.environ.copy()
-        environment.pop("PYTHONHOME", None)
-        environment.pop("PYTHONPATH", None)
-        environment.update(OLLAMA_HOST=f"127.0.0.1:{runtime.PORT}", OLLAMA_MODELS=str(app_dir / "models"), OLLAMA_NO_CLOUD="1")
         notify("importing", "Registering the verified model. Please wait until this finishes…")
         process = subprocess.run([str(app_dir / "runtime/ollama/ollama.exe"), "create", MODEL, "-f", str(modelfile)],
-            cwd=folder, env=environment, stdin=subprocess.DEVNULL, capture_output=True, text=True,
+            cwd=folder, env=engine_environment(app_dir, runtime.PORT), stdin=subprocess.DEVNULL, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=900, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if process.returncode:
             detail = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", process.stdout + process.stderr)[-1200:]
