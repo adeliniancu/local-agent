@@ -63,6 +63,7 @@ class LocalAgentApp:
         self.available_models: list[str] | None = None
         self.model_tool_support: bool | None = None
         self.model_thinking_support: bool | None = None
+        self.model_context_support: bool | None = None
         self.model_info_name = ""
         self.model_checking = False
         self.model_check_serial = 0
@@ -421,9 +422,17 @@ class LocalAgentApp:
         return {}
 
     def _can_send(self):
-        unsupported = self.model_info_name == self.model_var.get().strip() and self.model_tool_support is False
-        return (self.ready and not self.updating and not self.downloading and not self.model_checking and not unsupported
+        return (self.ready and not self.updating and not self.downloading and not self.model_checking and not self._model_block_reason()
                 and not self.closing and self.workspace.is_dir() and not (self.busy and self.cancel.is_set()))
+
+    def _model_block_reason(self):
+        if self.model_info_name != self.model_var.get().strip():
+            return ""
+        if self.model_tool_support is False:
+            return "This model does not support tools. Choose a tool-capable model for agent work."
+        if self.model_context_support is False:
+            return "This model's context is too small. Agent work needs at least 8,192 tokens of context."
+        return ""
 
     def toggle_settings(self):
         self.settings_expanded = not self.settings_expanded
@@ -638,7 +647,7 @@ class LocalAgentApp:
             self.model_name = str(saved.get("model") or DEFAULT_MODEL)
             self.reason_more = bool(saved.get("reason_more", False))
             profile = saved.get("performance_profile", "auto")
-            self.performance_profile = profile if profile in PROFILE_LABELS else "auto"
+            self.performance_profile = profile if isinstance(profile, str) and profile in PROFILE_LABELS else "auto"
             if self.history:
                 self.memory_state = self._history_memory_state(self.history) or self._clean_memory_state(saved.get("memory_state"))
         except (OSError, ValueError, TypeError):
@@ -661,8 +670,10 @@ class LocalAgentApp:
             self.model_name = self.model_var.get().strip() or DEFAULT_MODEL
             self._save_state()
             if self.model_name != self.model_info_name:
+                self.model_info_name = ""
                 self.model_tool_support = None
                 self.model_thinking_support = None
+                self.model_context_support = None
                 self.model_capability_label.configure(text="Tool support: not checked yet.", fg=COLORS["muted"])
                 self.refresh_model_info()
                 self._update_model_controls()
@@ -731,6 +742,7 @@ class LocalAgentApp:
         self.model_info_name = ""
         self.model_tool_support = None
         self.model_thinking_support = None
+        self.model_context_support = None
         self.folder_title.configure(text=self._short_name(workspace))
         self.folder_path.configure(text=self._short_path(workspace))
         self._render_history()
@@ -820,8 +832,12 @@ class LocalAgentApp:
         if self.model_checking:
             self.status_label.configure(text="Checking the selected model's tool support…")
             return
-        if self.model_info_name == self.model_var.get().strip() and self.model_tool_support is False:
-            self.status_label.configure(text="This model does not support tools. Choose a tool-capable model for agent work.")
+        if self._model_block_reason():
+            self.status_label.configure(text=self._model_block_reason())
+            return
+        if self.background_enabled and not self.busy and self.model_info_name != self.model_var.get().strip():
+            self.refresh_model_info()
+            self.status_label.configure(text="Checking the selected model's tool support. Send again when it is ready.")
             return
         if not self.workspace.is_dir():
             self.status_label.configure(text="Your previous folder is unavailable. Choose a folder before sending a task.")
@@ -1112,16 +1128,26 @@ class LocalAgentApp:
             self.connecting = False
             self.base_url = payload["base_url"]
             models = payload["models"]
+            self.available_models = list(models)
             self.model_box.configure(values=models)
             self.ready = bool(models)
+            requested = self.pending_model_selection
+            if requested:
+                selected = next((name for name in models if name == requested or name == requested + ":latest"), None)
+                if selected:
+                    self.model_var.set(selected)
+            self.pending_model_selection = None
             if self.model_var.get() not in models and models:
                 self.model_var.set(DEFAULT_MODEL if DEFAULT_MODEL in models else models[0])
+            self.model_info_name = ""
+            self.model_tool_support = self.model_thinking_support = self.model_context_support = None
+            self.model_checking = False
+            self.model_check_serial += 1
             self.engine_label.configure(text="●  Local engine ready" if models else "●  No local models installed",
                                         fg=COLORS["mint"] if models else COLORS["error"])
             self.retry_button.configure(state="normal")
             self.update_button.configure(state="normal")
-            self.send_button.configure(state="normal" if self._can_send() else "disabled")
-            if models:
+            if models or self.settings_expanded:
                 self.setup_bar.pack_forget()
             else:
                 self.setup_bar.pack(fill="x", padx=30, pady=(12, 0), before=self.transcript_frame)
@@ -1129,6 +1155,10 @@ class LocalAgentApp:
                 self.status_label.configure(text="Your previous folder is unavailable. Choose a folder before sending a task.")
             else:
                 self.status_label.configure(text="Ready. Tell your agent what to do." if models else "Download the local model once, then you can work offline.")
+            self._update_model_controls()
+            self.refresh_hardware()
+            self.refresh_model_info()
+            self._save_state()
         elif event == "connection_error":
             self.connecting = False
             self.ready = False
@@ -1137,23 +1167,76 @@ class LocalAgentApp:
             self.update_button.configure(state="normal")
             self.status_label.configure(text="Couldn't connect. Use Refresh connection to try again.")
             self._append("Connection: " + payload["text"] + "\n", "error")
+            self._update_model_controls()
+        elif event == "hardware_info":
+            self.hardware_checking = False
+            gpus = payload.get("gpus") or []
+            if gpus:
+                gpu = gpus[0]
+                description = (f"{gpu.get('name', 'GPU')} · {gpu.get('free_mb', 0) / 1024:.1f} / "
+                               f"{gpu.get('total_mb', 0) / 1024:.1f} GB VRAM available")
+                if len(gpus) > 1:
+                    description += f" · {len(gpus)} GPUs detected"
+            else:
+                description = "No NVIDIA GPU detected · CPU inference available"
+            if os.environ.get("LOCAL_AGENT_GPU_LAYERS") == "0":
+                description += " · CPU launcher active"
+            self.hardware_label.configure(text=description)
+        elif event == "hardware_error":
+            self.hardware_checking = False
+            self.hardware_label.configure(text="Hardware details unavailable. CPU inference remains available.")
+        elif event in {"model_info", "model_info_error"}:
+            if payload.get("serial") != self.model_check_serial or payload.get("model") != self.model_var.get().strip():
+                return
+            self.model_checking = False
+            self.model_info_name = payload["model"]
+            info = payload.get("info") or {}
+            capabilities = info.get("capabilities")
+            known = info.get("capabilities_known", bool(capabilities)) and isinstance(capabilities, list)
+            self.model_tool_support = "tools" in capabilities if known else None
+            self.model_thinking_support = "thinking" in capabilities if known else None
+            context = info.get("context_length")
+            self.model_context_support = context >= 8192 if isinstance(context, int) and context > 0 else None
+            if self.model_thinking_support is False:
+                self.think_var.set(False)
+            problem = self._model_block_reason()
+            if problem:
+                description = problem
+            elif self.model_tool_support is None:
+                description = "Tool support is unknown. This model may not work with file and command tools."
+            else:
+                description = "Tools supported"
+                if self.model_thinking_support is False:
+                    description += " · Reason more is unavailable for this model"
+                elif self.model_thinking_support:
+                    description += " · Reason more supported"
+                if isinstance(context, int) and context > 0:
+                    description += f" · Up to {min(16384, context):,} context tokens"
+            self.model_capability_label.configure(text=description, fg=COLORS["error"] if problem else COLORS["muted"])
+            if problem or self.model_tool_support is None:
+                self.status_label.configure(text=description)
+            self._update_model_controls()
+            self._save_state()
         elif event == "model_download_status":
             total = payload.get("total", 0)
             completed = payload.get("completed", 0)
-            progress = f" {min(100, int(100 * completed / total))}%" if total else ""
-            self.status_label.configure(text=f"{payload.get('status', 'Downloading model')}{progress}")
-            self.download_button.configure(text=f"Downloading{progress}…")
+            progress = f" {max(0, min(100, int(100 * completed / total)))}%" if total else ""
+            self.status_label.configure(text=f"{self.model_operation_label}: {payload.get('status', 'Working')}{progress}")
+            self.download_button.configure(text=f"{self.model_operation_label}{progress}…")
         elif event == "model_download_complete":
             self.downloading = False
+            self.pending_model_selection = payload.get("model", self.pending_model_selection)
             self.download_button.configure(state="normal", text="Download model (3.3 GB)")
             self.connect()
         elif event == "model_download_error":
             self.downloading = False
-            self.download_button.configure(state="normal", text="Retry model download")
+            self.pending_model_selection = None
+            self.download_button.configure(state="normal", text="Download model (3.3 GB)")
             self.retry_button.configure(state="normal")
             self.update_button.configure(state="normal")
-            self.status_label.configure(text="The download stopped. Retry to continue.")
-            self._append(payload.get("text", "Model download failed.") + "\n\n", "error")
+            self.status_label.configure(text=f"{self.model_operation_label} stopped. Check the message in chat, then try again.")
+            self._append(payload.get("text", "Model operation failed.") + "\n\n", "error")
+            self._update_model_controls()
         elif event == "status":
             self.status_label.configure(text=payload.get("text", ""))
         elif event == "token":
@@ -1271,6 +1354,7 @@ class LocalAgentApp:
         self.input.configure(state="disabled")
         self.always_allow_box.configure(state="disabled")
         self.model_box.configure(state="disabled")
+        self._update_model_controls()
         self._close_started = time.monotonic()
         self._wait_for_close()
 
