@@ -94,6 +94,8 @@ class LocalAgentApp:
         self.approval_request = None
         self.question_window: tk.Frame | None = None
         self.question_request = None
+        self.prompt_panel = None
+        self.prompt_body = None
         self.inline_cards: list[tk.Frame] = []
         self.stream_mark: str | None = None
         self.stream_start_mark: str | None = None
@@ -369,6 +371,12 @@ class LocalAgentApp:
                          activeforeground=COLORS["text"], selectcolor=COLORS["side"],
                          font=("Segoe UI", 9), bd=0)
         self.always_allow_box.pack(anchor="w", padx=10, pady=(0, 6))
+        self.decide_questions_var = tk.BooleanVar(value=False)
+        self.decide_questions_box = tk.Checkbutton(composer, text="Don't ask again in this chat (questions)",
+                         variable=self.decide_questions_var, command=self._toggle_question_permission,
+                         bg=COLORS["panel"], fg=COLORS["muted"], activebackground=COLORS["panel"],
+                         activeforeground=COLORS["text"], selectcolor=COLORS["side"], font=("Segoe UI", 9), bd=0)
+        self.decide_questions_box.pack(anchor="w", padx=10, pady=(0, 6))
         composer_actions = tk.Frame(composer, bg=COLORS["panel"])
         composer_actions.pack(fill="x", padx=12, pady=(0, 10))
         self.attach_button = self._button(composer_actions, "Attach files", self.attach_files)
@@ -588,6 +596,67 @@ class LocalAgentApp:
             self.download_name_var.set(selected[0])
             self.coding_preset_note.configure(text=selected[1] + " Click Download to add it.")
 
+    def _prompt_card(self, title):
+        """Pin active decisions above the composer; only their body scrolls."""
+        if self.settings_expanded:
+            self.toggle_settings()
+        if self.prompt_panel is not None:
+            self.prompt_panel.destroy()
+        panel = tk.Frame(self.footer_frame, bg=COLORS["panel"], padx=10, pady=7,
+                         highlightthickness=1, highlightbackground=COLORS["mint_dark"])
+        panel.pack(fill="x", padx=30, pady=(0, 6), before=self.composer_border)
+        self.prompt_panel = panel
+        self._label(panel, title, bold=True, color=COLORS["mint"]).pack(anchor="w")
+        viewport = tk.Frame(panel, bg=COLORS["panel"])
+        viewport.pack(fill="x", pady=4)
+        canvas = tk.Canvas(viewport, height=90, width=1, bg=COLORS["panel"], highlightthickness=0)
+        scroll = ttk.Scrollbar(viewport, orient="vertical", command=canvas.yview)
+        scroll.pack(side="right", fill="y")
+        canvas.pack(side="left", fill="x", expand=True)
+        canvas.configure(yscrollcommand=scroll.set)
+        body = tk.Frame(canvas, bg=COLORS["panel"])
+        item = canvas.create_window(0, 0, window=body, anchor="nw")
+        self.prompt_body = body
+        self.prompt_actions = tk.Frame(panel, bg=COLORS["panel"])
+        self.prompt_actions.pack(fill="x")
+        self.input.configure(height=2)
+
+        def wheel(event):
+            canvas.yview_scroll(-1 if event.delta > 0 else 1, "units")
+            return "break"
+
+        def fit(event=None):
+            if not panel.winfo_exists():
+                return
+            width = max(200, canvas.winfo_width())
+            canvas.itemconfigure(item, width=width)
+            def visit(widget):
+                for child in widget.winfo_children():
+                    if isinstance(child, (tk.Label, tk.Radiobutton)):
+                        child.configure(wraplength=max(180, width - 16))
+                    if not isinstance(child, tk.Text):
+                        child.bind("<MouseWheel>", wheel)
+                    visit(child)
+            visit(body)
+            canvas.configure(scrollregion=canvas.bbox("all"),
+                             height=min(120, max(60, self.root.winfo_height() // 7)))
+        canvas.bind("<Configure>", fit)
+        body.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
+        canvas.bind("<MouseWheel>", wheel)
+        self.root.after_idle(fit)
+        return body
+
+    def _toggle_question_permission(self):
+        if self.decide_questions_var.get() and self.question_request is not None and not self.cancel.is_set():
+            self._answer_question(self._delegated_question_answer())
+
+    @staticmethod
+    def _delegated_question_answer():
+        return ("I selected Don't ask again in this chat for clarification questions. "
+                "Use your best judgment for routine, reversible implementation choices and state your assumptions. "
+                "Do not invent missing facts or credentials. If an essential fact cannot be inferred, explain the blocker. "
+                "This does not approve commands, destructive actions, purchases, or external sharing.")
+
     def _inline_card(self, title):
         card = tk.Frame(self.transcript, bg=COLORS["panel"], highlightbackground=COLORS["border"],
                         highlightthickness=1, padx=12, pady=10)
@@ -618,6 +687,12 @@ class LocalAgentApp:
             resize(card)
 
     def _resolve_inline_card(self, card, text):
+        if card is not None and card is self.prompt_body:
+            self.prompt_panel.destroy()
+            self.prompt_panel = self.prompt_body = None
+            self.input.configure(height=3)
+            self._append(text + "\n", "muted")
+            return
         if card is None or not card.winfo_exists():
             return
         for child in card.winfo_children():
@@ -636,6 +711,7 @@ class LocalAgentApp:
     def _reset_command_permission(self):
         self.allow_commands.clear()
         self.always_allow_var.set(False)
+        self.decide_questions_var.set(False)
 
     @staticmethod
     def _short_path(path):
@@ -1262,7 +1338,7 @@ class LocalAgentApp:
         if self.allow_commands.is_set():
             self._answer_approval(True)
             return
-        content = self._inline_card("Run this command?")
+        content = self._prompt_card("Run this command?")
         self.approval_window = content
         self._label(content, str(request["cwd"]), size=9, color=COLORS["muted"],
                     wraplength=450, justify="left").pack(anchor="w", pady=(0, 8))
@@ -1278,7 +1354,11 @@ class LocalAgentApp:
         command_box.pack(side="left", fill="both", expand=True)
         self._label(content, "Commands run with your Windows account and can access files outside the selected folder.",
                     size=8, color=COLORS["muted"], wraplength=450, justify="left").pack(anchor="w", pady=(8, 0))
-        buttons = tk.Frame(content, bg=COLORS["panel"])
+        tk.Checkbutton(self.prompt_actions, text="Don't ask again in this chat (commands)",
+                       variable=self.always_allow_var, command=self._toggle_command_permission,
+                       bg=COLORS["panel"], fg=COLORS["text"], selectcolor=COLORS["side"],
+                       activebackground=COLORS["panel"], font=("Segoe UI", 9)).pack(anchor="w")
+        buttons = tk.Frame(self.prompt_actions, bg=COLORS["panel"])
         buttons.pack(fill="x", pady=(9, 0))
         self._button(buttons, "Allow once", lambda: self._answer_approval(True), primary=True).pack(side="right")
         self._button(buttons, "Reject", lambda: self._answer_approval(False)).pack(side="right", padx=8)
@@ -1307,24 +1387,15 @@ class LocalAgentApp:
         self.question_request = request
         self._append("QUESTION FOR YOU\n", "agent_role")
         self._append(request["question"] + "\n\n")
-        content = self._inline_card("Choose an answer" if request.get("options") else "Your answer")
+        if self.decide_questions_var.get():
+            self._answer_question(self._delegated_question_answer())
+            return
+        content = self._prompt_card("Choose an answer" if request.get("options") else "Your answer")
+        self._label(content, request["question"], justify="left", wraplength=450).pack(fill="x", pady=(0, 6))
         self.question_window = content
         selected = tk.StringVar(value="")
         if request.get("options"):
-            scroll_frame = tk.Frame(content, bg=COLORS["panel"])
-            scroll_frame.pack(fill="x")
-            canvas = tk.Canvas(scroll_frame, bg=COLORS["panel"], width=440, height=90, bd=0, highlightthickness=0)
-            scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=canvas.yview)
-            canvas.configure(yscrollcommand=scrollbar.set)
-            scrollbar.pack(side="right", fill="y")
-            canvas.pack(side="left", fill="x", expand=True)
-            choices = tk.Frame(canvas, bg=COLORS["panel"])
-            canvas_item = canvas.create_window((0, 0), window=choices, anchor="nw")
-
-            def fit_choices(_event=None):
-                canvas.configure(scrollregion=canvas.bbox("all"), height=min(140, max(28, choices.winfo_reqheight())))
-            choices.bind("<Configure>", fit_choices)
-            canvas.bind("<Configure>", lambda event: canvas.itemconfigure(canvas_item, width=event.width))
+            choices = content
             for option in request.get("options", [])[:6]:
                 tk.Radiobutton(choices, text=str(option), variable=selected, value=str(option),
                                bg=COLORS["panel"], fg=COLORS["text"], activebackground=COLORS["panel"],
@@ -1339,7 +1410,7 @@ class LocalAgentApp:
                 self.input.delete("1.0", "end")
                 self._answer_question(text)
             return "break"
-        buttons = tk.Frame(content, bg=COLORS["panel"])
+        buttons = tk.Frame(self.prompt_actions, bg=COLORS["panel"])
         buttons.pack(fill="x", pady=(9, 0))
         self._button(buttons, "Send answer", submit, primary=True).pack(side="right")
         self._button(buttons, "Skip", lambda: self._answer_question(None)).pack(side="right", padx=8)
