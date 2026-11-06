@@ -89,6 +89,29 @@ class ContinuationTests(unittest.TestCase):
         self.assertEqual(count, 27)
         self.assert_clean_end()
 
+    def test_three_identical_command_failures_remain_a_clean_pause(self):
+        count = 0
+        def command(**_):
+            nonlocal count
+            count += 1
+            result = {"exit_code": 1, "output": "ModuleNotFoundError: missing package"}
+            self.agent._record_command_result(result)
+            return result
+        self.agent._run_command = command
+        self.agent._chat = lambda: actions(call("run_command", command="python check.py"))
+        self.agent.run("Check the project")
+        self.assertEqual(count, 3)
+        self.assertIn("same command error", self.agent.history[-1]["content"])
+        self.assert_clean_end()
+
+    def test_repeated_successful_commands_do_not_fake_progress(self):
+        self.agent._run_command = lambda **_: {"exit_code": 0, "output": "same result"}
+        self.agent._chat = lambda: actions(call("run_command", command="python check.py"))
+        self.agent.run("Check the project")
+        self.assertEqual(sum(item["role"] == "tool" for item in self.agent.history), 9)
+        self.assertIn("no new result", self.agent.history[-1]["content"])
+        self.assert_clean_end()
+
     def test_repeated_plan_updates_do_not_fake_progress_and_batch_is_completed(self):
         self.agent._chat = lambda: actions(*[call("set_plan", steps=[{"text": "Inspect", "status": "in_progress"}])
                                               for _ in range(10)])

@@ -949,8 +949,12 @@ class Agent:
         if name in {"write_file", "replace_text"}:
             try:
                 path = self._path(arguments["path"])
+                with path.open("rb") as handle:
+                    content = handle.read(MAX_FILE_BYTES + 1)
+                if len(content) > MAX_FILE_BYTES:
+                    return None
                 stable = {"path": str(path.relative_to(self.workspace)),
-                          "content_sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+                          "content_sha256": hashlib.sha256(content).hexdigest()}
             except (OSError, ValueError, KeyError):
                 return None
         # Different commands can do useful work while producing identical stdout.
