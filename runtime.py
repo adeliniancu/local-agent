@@ -168,14 +168,14 @@ def get_inference_options(model: str, profile: str = "auto") -> dict:
     model = _validate_model_name(model)
     if profile not in PERFORMANCE_PROFILES:
         raise ValueError("Choose a recognized performance profile.")
+    if profile == "cpu":
+        return {"num_ctx": 16384, "num_gpu": 0}
     override = os.environ.get("LOCAL_AGENT_GPU_LAYERS")
     if override is not None:
         try:
             return {"num_ctx": 16384, "num_gpu": max(0, min(999, int(override)))}
         except ValueError:
             pass
-    if profile == "cpu":
-        return {"num_ctx": 16384, "num_gpu": 0}
     metadata = get_model_info(model)
     hardware = get_hardware_info()
     loaded = _get("/api/ps", timeout=5).get("models", [])
