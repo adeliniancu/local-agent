@@ -843,14 +843,14 @@ class Agent:
         requests = []
         allocation = max(250, int(byte_limit * 0.36) // max(1, len(chosen)))
         for index, item in chosen:
-            requests.append(f"User #{index}: " + self._excerpt(item.get("content", ""), allocation))
+            requests.append(f"User #{index}: " + self._excerpt(item.get("user_text", item.get("content", "")), allocation))
         if len(users) > len(chosen):
             requests.append(f"{len(users) - len(chosen)} additional user messages are available through read_working_history.")
         # Preserve explicit limits even when they are in the middle of a huge request.
         constraints = []
         pattern = re.compile(r"\b(?:do not|don't|never|must|only|without|avoid|except|keep|preserve|instead|stop|cancel|nu|doar|fără)\b", re.I)
         for index, item in reversed(users):
-            text = str(item.get("content", ""))
+            text = str(item.get("user_text", item.get("content", "")))
             for match in pattern.finditer(text):
                 constraints.append(f"User #{index} excerpt: " + self._excerpt(text[match.start():match.end()+180], 250))
                 if len(constraints) >= 6:
