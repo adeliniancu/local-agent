@@ -207,6 +207,31 @@ class InstallerTests(unittest.TestCase):
             self.install(runtime, lambda *args, **kwargs: self.fail("Old-engine import"))
         self.assertEqual(self.requests, [])
 
+    def test_temporary_engine_owns_separate_port_and_restores_runtime_after_error(self):
+        runtime = self.runtime()
+        runtime.BASE_URL = "http://127.0.0.1:11435"
+        runtime._get = lambda path, timeout: {"version": "0.40.15"}
+        process = SimpleNamespace(poll=lambda: None, terminate=lambda: None, wait=lambda timeout: None)
+        with patch.object(installer.subprocess, "Popen", return_value=process) as spawn, \
+                patch.object(process, "terminate") as terminate:
+            with self.assertRaisesRegex(installer.InstallError, "test failure"):
+                with installer.owned_engine(self.app, runtime, self.cancel):
+                    self.assertNotEqual(runtime.PORT, 11435)
+                    self.assertEqual(runtime.BASE_URL, f"http://127.0.0.1:{runtime.PORT}")
+                    self.assertEqual(spawn.call_args.kwargs["env"]["OLLAMA_MODELS"], str(self.app / "models"))
+                    self.assertEqual(spawn.call_args.kwargs["env"]["OLLAMA_HOST"], f"127.0.0.1:{runtime.PORT}")
+                    raise installer.InstallError("test failure")
+            terminate.assert_called_once()
+        self.assertEqual(runtime.PORT, 11435)
+        self.assertEqual(runtime.BASE_URL, "http://127.0.0.1:11435")
+
+    def test_untrusted_redirects_rejected(self):
+        handler = installer.TrustedRedirects()
+        for url in ("http://github.com/model", "https://evil.example/model",
+                    "https://github.com:8443/model", "https://user@github.com/model"):
+            with self.subTest(url=url), self.assertRaises(installer.InstallError):
+                handler.redirect_request(None, None, 302, "", {}, url)
+
 
 if __name__ == "__main__":
     unittest.main()

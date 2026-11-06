@@ -110,7 +110,7 @@ class TrustedRedirects(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, request, fp, code, message, headers, url):
         parsed = urllib.parse.urlsplit(url)
         if (parsed.scheme != "https" or parsed.hostname not in {"github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
-                or parsed.username or parsed.password or parsed.fragment):
+                or parsed.username or parsed.password or parsed.fragment or parsed.port not in (None, 443)):
             raise InstallError("The download redirected to an untrusted address")
         return super().redirect_request(request, fp, code, message, headers, url)
 
