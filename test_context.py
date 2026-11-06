@@ -184,6 +184,30 @@ class ContextTests(unittest.TestCase):
             self.assertEqual(self.agent.history[0][CONTEXT_STATE]["compactions"], 1)
             self.assert_valid_protocol(messages)
 
+    def test_large_read_explains_exact_retrieval_instead_of_repeating_read(self):
+        self.agent.history = [{"role": "user", "content": "Inspect the source"}]
+        self.agent.history += tool_group("read_file", {"path": "source.py"}, {"content": "important_start = 1\n" + "large " * 10000})
+        self.agent._messages()
+        summary = self.agent.history[0]["content"]
+        self.assertIn("important_start", summary)
+        self.assertIn("page result #2", summary)
+        self.assertIn("instead of repeating", summary)
+
+    def test_exact_retrieval_survives_aggressive_compaction_with_escaped_text(self):
+        (Path(self.temp.name) / "AGENTS.md").write_text('Keep files. "quoted" \\ path\n' * 1000, encoding="utf-8")
+        self.agent.history = [{"role": "user", "content": 'Retrieve this exact data: "quoted" \\ value\n' * 5000}]
+        self.agent._messages(force_compact=True, aggressive=True)
+        result = self.agent._read_working_history(message_index=0, max_chars=6000)
+        self.assertIsNotNone(result["next_start"])
+        self.agent.history += tool_group("read_working_history", {"message_index": 0, "max_chars": 6000}, result)
+        messages = self.agent._messages()
+        self.assertTrue(any(item.get("tool_name") == "read_working_history" for item in messages))
+        self.assertLessEqual(self.agent._request_size(messages), 16_000)
+        counter = self.agent.history[0][CONTEXT_STATE]["compactions"]
+        self.agent._messages()
+        self.assertEqual(self.agent.history[0][CONTEXT_STATE]["compactions"], counter)
+        self.assert_valid_protocol(messages)
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
