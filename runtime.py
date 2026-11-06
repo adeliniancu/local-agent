@@ -357,7 +357,8 @@ def _attachment_dir():
     return directory
 
 
-def _read_attachment_bytes(path: Path, limit: int = MAX_ATTACHMENT_BYTES) -> bytes:
+def _read_attachment_bytes(path: Path, limit: int | None = None) -> bytes:
+    limit = MAX_ATTACHMENT_BYTES if limit is None else limit
     with path.open("rb") as stream:
         data = stream.read(limit + 1)
     if len(data) > limit:
