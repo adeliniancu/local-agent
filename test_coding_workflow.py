@@ -1,5 +1,6 @@
 """Precise edits preserve concurrent changes and unrelated file bytes."""
 import hashlib
+import json
 from pathlib import Path
 import tempfile
 import threading
@@ -109,6 +110,51 @@ class CodingWorkflowTests(unittest.TestCase):
         self.agent._execute("write_file", {"path": "source.py", "content": "value = 1"})
         self.edit("value = 1", "value = 2")
         self.assertEqual(self.path.read_text(), "value = 2")
+
+    def test_qwen_bare_tool_json_executes_through_normal_file_guards(self):
+        self.agent.model = "qwen2.5-coder:7b"
+        responses = iter([{"role": "assistant", "content": json.dumps({"name": "write_file", "arguments": {
+            "path": "source.py", "content": "value = 1"}})}, {"role": "assistant", "content": "Created source.py."}])
+        self.agent._chat = lambda: next(responses)
+        self.agent.run("Create source.py")
+        self.assertEqual(self.path.read_text(), "value = 1")
+        self.assertEqual(sum(item["role"] == "tool" for item in self.agent.history), 1)
+
+    def test_qwen_tool_fallback_never_extracts_examples_or_invalid_requests(self):
+        self.agent.model = "qwen2.5-coder:7b"
+        valid = json.dumps({"name": "write_file", "arguments": {"path": "source.py", "content": "x"}})
+        cases = ["Here is an example: " + valid, "```json\n" + valid + "\n```", valid + valid,
+                 json.dumps({"name": "write_file", "arguments": {"path": "source.py", "content": "x"}, "explanation": "example"}),
+                 json.dumps({"name": "unknown_tool", "arguments": {}}),
+                 json.dumps({"name": "write_file", "arguments": {"path": "source.py"}}),
+                 json.dumps({"name": "write_file", "arguments": {"path": 3, "content": "x"}}),
+                 json.dumps({"name": "write_file", "arguments": {"path": "source.py", "content": "x", "extra": True}}),
+                 json.dumps({"name": "run_command", "arguments": {"command": "echo example", "timeout_seconds": True}}),
+                 json.dumps({"name": "read_file", "arguments": "source.py"}),
+                 '{"name":"read_file","name":"write_file","arguments":{"path":"source.py","content":"x"}}',
+                 '{"value": 42}', '[{"name":"read_file","arguments":{"path":"source.py"}}]']
+        for content in cases:
+            with self.subTest(content=content):
+                message = {"role": "assistant", "content": content}
+                self.assertEqual(self.agent._normalize_tool_message(message), message)
+        self.assertFalse(self.path.exists())
+
+    def test_qwen_wrapped_call_is_supported_but_other_models_unchanged(self):
+        content = '<tool_call>{"name":"read_file","arguments":{"path":"source.py"}}</tool_call>'
+        message = {"role": "assistant", "content": content}
+        self.assertEqual(self.agent._normalize_tool_message(message), message)
+        self.agent.model = "qwen2.5-coder:7b"
+        self.assertEqual(self.agent._normalize_tool_message(message)["tool_calls"][0]["function"]["name"], "read_file")
+
+    def test_qwen_json_command_still_requires_approval(self):
+        self.agent.model = "qwen2.5-coder:7b"
+        approved = []
+        self.agent.approve = lambda command, cwd: approved.append(command) or False
+        self.agent._chat = lambda: {"role": "assistant", "content": '{"name":"run_command","arguments":{"command":"echo example"}}'}
+        with patch("agent_core.subprocess.Popen") as process:
+            self.agent.run("Run the command")
+        self.assertEqual(approved, ["echo example"])
+        process.assert_not_called()
 
 
 if __name__ == "__main__":
