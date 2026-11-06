@@ -26,10 +26,23 @@ class CodingBenchmarkTests(unittest.TestCase):
     def test_fixed_tests_outside_workspace_and_only_main_is_editable(self):
         workspace,tests=benchmark.prepare_case('ledger',self.root/'case')
         self.assertFalse(tests.is_relative_to(workspace))
+        self.assertEqual((workspace/'fixed_tests.py').read_bytes(),tests.read_bytes())
         agent=benchmark.evaluation_agent(agent_core,workspace,tests,lambda *_:None,threading.Event(),'fake',False)
+        self.assertIn('test_exact_cents',agent._execute('read_file',{'path':'fixed_tests.py'})['content'])
         with self.assertRaises(PermissionError): agent._execute('write_file',{'path':'fixed_tests.py','content':'pass'})
         with self.assertRaises(ValueError): agent._execute('read_file',{'path':'../fixed_tests.py'})
         with self.assertRaises(PermissionError): agent._execute('launch_python_app',{'path':'main.py'})
+
+    def test_tampered_reference_cannot_change_external_validation(self):
+        workspace,tests=benchmark.prepare_case('ledger',self.root/'case')
+        original=tests.read_bytes()
+        reference=workspace/'fixed_tests.py'
+        reference.chmod(0o666)
+        reference.write_text('print("all checks passed")\n',encoding='utf-8')
+        result=benchmark.validate(workspace,tests)
+        self.assertNotEqual(result['exit_code'],0)
+        self.assertEqual(tests.read_bytes(),original)
+        self.assertIn('test_exact_cents',result['output'])
 
     def test_only_fixed_command_runs_without_shell(self):
         workspace,tests=benchmark.prepare_case('ledger',self.root/'case')

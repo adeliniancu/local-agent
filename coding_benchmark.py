@@ -205,6 +205,12 @@ def prepare_case(case: str, directory: Path, *, reference: bool = False):
     (workspace / "main.py").write_text(source, encoding="utf-8")
     tests = directory / "fixed_tests.py"
     tests.write_text(TEST_HEADER + CASES[case]["tests"] + "\nif __name__=='__main__': unittest.main()\n", encoding="utf-8")
+    # Show the exact checks named by tracebacks without giving the agent write
+    # access to the authoritative runner. Validation always uses the sibling
+    # file outside this editable project, never this reference copy.
+    reference = workspace / "fixed_tests.py"
+    reference.write_bytes(tests.read_bytes())
+    reference.chmod(0o444)
     return workspace, tests
 
 
