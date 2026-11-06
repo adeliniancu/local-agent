@@ -197,7 +197,8 @@ def engine_environment(app_dir, port):
     environment = os.environ.copy()
     environment.pop("PYTHONHOME", None)
     environment.pop("PYTHONPATH", None)
-    environment.update(OLLAMA_HOST=f"127.0.0.1:{port}", OLLAMA_MODELS=str(app_dir / "models"), OLLAMA_NO_CLOUD="1")
+    environment.update(OLLAMA_HOST=f"127.0.0.1:{port}", OLLAMA_MODELS=str(app_dir / "models"),
+                       OLLAMA_NO_CLOUD="1", OLLAMA_NOPRUNE="1", OLLAMA_MAX_LOADED_MODELS="1", OLLAMA_NUM_PARALLEL="1")
     return environment
 
 
