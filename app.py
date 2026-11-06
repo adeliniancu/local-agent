@@ -836,7 +836,7 @@ class LocalAgentApp:
                 if message.get("role") in ("user", "assistant") and (message.get("content") or message.get("attachments")):
                     is_user = message["role"] == "user"
                     self._append("YOU\n" if is_user else "LOCAL AGENT\n", "user_role" if is_user else "agent_role")
-                    content = message.get("_display_content", message.get("content", ""))
+                    content = message.get("user_text", message.get("_display_content", message.get("content", "")))
                     if content:
                         self._append(str(content) + "\n\n")
                     self._render_attachments(message.get("attachments", []))
