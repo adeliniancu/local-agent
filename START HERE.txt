@@ -31,11 +31,36 @@ CHAT CONTROLS
   already being generated.
 - Questions appear inside the chat. Pick an option and click Send answer,
   or type your own answer in the message box. Skip pauses for your next message.
-- Reason more gives the same model extra time to think about a task.
+- Reason more gives a supported model extra time to think about a task.
+  It is disabled when the selected model does not support thinking.
 - Elapsed shows time spent on the current task, including waits for you.
   Last generation tokens/s uses the model's reported generation speed;
   it appears after a response has finished.
 - The agent can show a short plan and update its steps as it works.
+
+MODELS AND PERFORMANCE
+
+Open Models & performance at the top of the chat to change these settings.
+
+- Auto adjusts GPU use to the detected hardware and available video memory.
+  You can also choose RTX 5060 desktop, RTX 4070 laptop, RTX 5080 desktop,
+  or CPU. The profile is saved and applies when you start your next task.
+  The panel shows detected hardware and available VRAM. Profiles do not
+  guarantee a particular speed; the tokens/s counter always uses real results.
+- To add an Ollama model, enter its model name and click Download. Model
+  downloads need internet access and enough storage for the selected model.
+- To import your own local weights, enter a new model name, choose a .gguf
+  file, then click Import. Choosing a file alone does not import it.
+- After downloading or importing, the model is selected in the sidebar.
+  You can switch back to another installed model there.
+
+Agent work needs a model with tool calling and at least 8,192 context tokens.
+The app uses up to 16,384 context tokens when the model supports them.
+Models explicitly lacking these capabilities cannot start an agent task.
+If capability information is missing, the app labels support as unknown;
+an imported model is not guaranteed to work with file and command tools.
+Model and performance controls are unavailable while a task or model transfer
+is running. Selecting a profile or opening the panel never downloads a model.
 
 WHEN IT WORKS ON FILES
 
@@ -64,6 +89,11 @@ large, the agent summarizes older steps automatically so it can continue.
 chat remains saved. The working summary keeps recent instructions and
 useful facts, but cannot retain every detail. The agent can look back at
 earlier messages when needed; you can also remind it of a critical detail.
+
+Long tasks can continue past the initial 24-step checkpoint automatically.
+Repeated actions that make no progress cause a pause. The agent also pauses
+after 120 model steps or about an hour, at a safe step boundary. Your chat
+stays saved; send "Continue" when you want it to keep working.
 
 UPDATE THE APP
 
