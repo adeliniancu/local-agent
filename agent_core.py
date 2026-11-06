@@ -176,10 +176,19 @@ class Agent:
         budget = min(max_chars, 4000 if self._context_window() >= 16384 else 1600)
         page = text[start:start + budget].encode("utf-8")[:budget].decode("utf-8", errors="ignore")
         end = start + len(page)
-        complete = start == 0 and end == len(text)
-        self._file_versions[path] = {"sha256": version, "complete": complete}
+        observed = self._file_versions.get(path, {})
+        ranges = list(observed.get("ranges", [])) if observed.get("sha256") == version else []
+        ranges.append((start, end))
+        merged = []
+        for left, right in sorted(ranges):
+            if merged and left <= merged[-1][1]:
+                merged[-1] = (merged[-1][0], max(right, merged[-1][1]))
+            else:
+                merged.append((left, right))
+        complete = merged == [(0, len(text))]
+        self._file_versions[path] = {"sha256": version, "complete": complete, "ranges": merged}
         return {"path": str(path.relative_to(self.workspace)), "content": page,
-                "truncated": not complete, "sha256": version, "start": start, "end": end,
+                "truncated": start != 0 or end != len(text), "sha256": version, "start": start, "end": end,
                 "next_start": end if end < len(text) else None, "total_chars": len(text),
                 "note": "Use edit_file for a focused change. Read the next page only if needed."}
 

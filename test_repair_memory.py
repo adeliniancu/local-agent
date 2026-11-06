@@ -65,6 +65,24 @@ class RepairMemoryTests(unittest.TestCase):
         self.assertEqual([page["content"] for page in visible], [page["content"] for page in pages])
         self.assertLessEqual(self.agent._request_size(messages), self.agent._context_budgets()[0])
 
+    def test_full_replacement_requires_all_pages_of_same_version(self):
+        target = self.root / "large.py"
+        target.write_text("# original\n" * 1000)
+        self.agent._read_file(target, 0)
+        self.agent._read_file(target, 8000)
+        with self.assertRaisesRegex(ValueError, "partial read"):
+            self.agent._write(target, "# replacement\n")
+        self.agent._read_file(target, 4000)
+        self.assertTrue(self.agent._file_versions[target]["complete"])
+        # Reading a page after an external edit must reset previous coverage.
+        target.write_text("# changed!\n" * 1000)
+        self.agent._read_file(target, 4000)
+        self.assertFalse(self.agent._file_versions[target]["complete"])
+        self.agent._read_file(target, 0)
+        self.agent._read_file(target, 8000)
+        self.agent._write(target, "# replacement\n")
+        self.assertEqual(target.read_text(), "# replacement\n")
+
     def test_launch_is_nonblocking_and_does_not_duplicate(self):
         (self.root / "app.py").write_text("import time\ntime.sleep(30)\n")
         first = self.agent._execute("launch_python_app", {"path": "app.py"})
