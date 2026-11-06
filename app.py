@@ -242,7 +242,16 @@ class LocalAgentApp:
         self.settings_toggle.pack(side="right")
         tk.Frame(main, bg=COLORS["border"], height=1).pack(fill="x", padx=30)
 
-        self.settings_panel = tk.Frame(main, bg=COLORS["panel"], padx=12, pady=10)
+        self.settings_container = tk.Frame(main, bg=COLORS["panel"])
+        self.settings_canvas = tk.Canvas(self.settings_container, height=224, highlightthickness=0, bg=COLORS["panel"])
+        settings_scrollbar = ttk.Scrollbar(self.settings_container, orient="vertical", command=self.settings_canvas.yview)
+        self.settings_canvas.configure(yscrollcommand=settings_scrollbar.set)
+        settings_scrollbar.pack(side="right", fill="y")
+        self.settings_canvas.pack(side="left", fill="both", expand=True)
+        self.settings_panel = tk.Frame(self.settings_canvas, bg=COLORS["panel"], padx=12, pady=10)
+        settings_window = self.settings_canvas.create_window(0, 0, window=self.settings_panel, anchor="nw")
+        self.settings_canvas.bind("<Configure>", lambda event: self.settings_canvas.itemconfigure(settings_window, width=event.width))
+        self.settings_panel.bind("<Configure>", lambda _event: self.settings_canvas.configure(scrollregion=self.settings_canvas.bbox("all")))
         self.settings_panel.grid_columnconfigure(1, weight=1)
         self._label(self.settings_panel, "Performance", size=9).grid(row=0, column=0, sticky="w", padx=(0, 9))
         self.profile_var = tk.StringVar(value=PROFILE_LABELS[self.performance_profile])
@@ -453,6 +462,8 @@ class LocalAgentApp:
         return "break"
 
     def _add_attachments(self, items):
+        if items and self.settings_expanded:
+            self.toggle_settings()
         for item in items:
             if not isinstance(item, dict) or not item.get("id"):
                 continue
@@ -673,11 +684,11 @@ class LocalAgentApp:
         self.settings_toggle.configure(text="Models & performance ▴" if self.settings_expanded else "Models & performance ▾")
         if self.settings_expanded:
             self.setup_bar.pack_forget()
-            self.settings_panel.pack(fill="x", padx=30, pady=(10, 0), before=self.transcript_frame)
+            self.settings_container.pack(fill="x", padx=30, pady=(10, 0), before=self.transcript_frame)
             self.refresh_hardware()
             self.refresh_model_info()
         else:
-            self.settings_panel.pack_forget()
+            self.settings_container.pack_forget()
             if self.available_models == []:
                 self.setup_bar.pack(fill="x", padx=30, pady=(12, 0), before=self.transcript_frame)
         self._update_model_controls()
