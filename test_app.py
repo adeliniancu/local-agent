@@ -16,7 +16,7 @@ import app
 class DesktopTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.data = Path(self.temp.name)
+        self.data = Path(self.temp.name).resolve()
         self.patches = [patch.object(app, "DATA", self.data), patch.object(app, "STATE", self.data / "last-chat.json")]
         for item in self.patches:
             item.start()

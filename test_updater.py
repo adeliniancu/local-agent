@@ -23,7 +23,9 @@ import updater
 class UpdateTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="LocalAgent-update-test-")
-        self.root = Path(self.temporary.name)
+        # Windows runners can expose TEMP through an 8.3 alias. Match the
+        # installer's resolved paths so fault injection targets the same file.
+        self.root = Path(self.temporary.name).resolve()
         self.source = self.root / "source"
         self.source.mkdir()
         for name in worker.REQUIRED_FILES:
