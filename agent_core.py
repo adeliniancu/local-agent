@@ -521,7 +521,18 @@ class Agent:
             if instructions.exists():
                 instructions = self._path("AGENTS.md")
                 full = self._read(instructions)
-                text += "\nProject instructions (AGENTS.md):\n" + self._excerpt(full, 3000)
+                addition = "\nProject instructions (AGENTS.md):\n" + self._excerpt(full, 3000)
+                if self._context_window() < 16384:
+                    maximum = self._context_budgets()[2] - 2200
+                    limit = 1500
+                    while limit >= 100:
+                        addition = "\nProject instructions (AGENTS.md; read the complete file before changes):\n" + self._excerpt(full, limit)
+                        if self._request_size([{"role": "system", "content": text + addition}]) <= maximum:
+                            break
+                        limit //= 2
+                    else:
+                        addition = "\nRead AGENTS.md before changes; its full project instructions do not fit this excerpt."
+                text += addition
                 if len(full.encode("utf-8")) > 3000:
                     text += "\nAGENTS.md is longer than this excerpt. Inspect the full file for requirements relevant to your changes."
         except (ValueError, OSError, UnicodeError):
@@ -542,15 +553,31 @@ class Agent:
     def _records(self):
         return [item for item in self.history if CONTEXT_STATE not in item]
 
+    def _context_window(self):
+        return int((self._inference_options_cache or {}).get("num_ctx", 16384))
+
+    @staticmethod
+    def _scaled_context_bytes(value, context):
+        # Tool schemas are fixed overhead; scale the remaining conversation space.
+        return 4000 + int((value - 4000) * min(context, 16384) / 16384)
+
+    def _context_budgets(self):
+        context = self._context_window()
+        return tuple(self._scaled_context_bytes(value, context)
+                     for value in (CONTEXT_BUDGET_BYTES, COMPACT_TARGET_BYTES, 16_000))
+
     def _context_state(self):
         records = self._records()
         boundaries = {0, len(records)} | {start for start, _, _ in self._groups(records)}
         for item in self.history:
             state = item.get(CONTEXT_STATE)
+            context = state.get("context_tokens", 16384) if isinstance(state, dict) else 16384
             if (item.get("role") == "system" and isinstance(state, dict) and state.get("schema") == 1
                     and type(state.get("covered_messages")) is int and state["covered_messages"] in boundaries
                     and type(state.get("compactions")) is int and state["compactions"] >= 0
-                    and state.get("budget_bytes") in {16_000, CONTEXT_BUDGET_BYTES}
+                    and type(context) is int and 8192 <= context <= 16384
+                    and state.get("budget_bytes") in {self._scaled_context_bytes(value, context)
+                                                       for value in (16_000, CONTEXT_BUDGET_BYTES)}
                     and isinstance(item.get("content"), str)):
                 return item
         return None
@@ -604,7 +631,9 @@ class Agent:
     def _fit_history_result(self, result):
         """Leave room for this retrieval to survive the next compaction, including JSON escaping."""
         base = self._request_size([{"role": "system", "content": self._system()}])
-        budget = min(6500, max(700, 16_000 - base - 2800))
+        scale = self._context_window() / 16384
+        budget = min(int(6500 * scale), max(400 if scale < 1 else 700,
+                                          self._context_budgets()[2] - base - int(2800 * scale)))
         for _ in range(16):
             encoded = json.dumps({"role": "tool", "tool_name": "read_working_history",
                                   "content": json.dumps(result, ensure_ascii=False)}, ensure_ascii=False).encode("utf-8")
@@ -739,7 +768,12 @@ class Agent:
         marker = self._context_state()
         system = self._system()
         saved_budget = marker[CONTEXT_STATE].get("budget_bytes") if marker else None
-        limit = 16_000 if aggressive or saved_budget == 16_000 else CONTEXT_BUDGET_BYTES
+        normal, normal_target, reduced = self._context_budgets()
+        previous_context = marker[CONTEXT_STATE].get("context_tokens", 16384) if marker else 16384
+        was_aggressive = saved_budget == self._scaled_context_bytes(16_000, previous_context)
+        reduced_mode = aggressive or was_aggressive
+        limit = reduced if reduced_mode else normal
+        scale = self._context_window() / 16384
         messages = self._compose_messages(system, records, marker)
         groups = self._groups(records)
         covered = marker[CONTEXT_STATE]["covered_messages"] if marker else 0
@@ -748,14 +782,18 @@ class Agent:
             return messages
         self.emit("status", {"text": "Summarizing working memory and continuing. Full chat and completed changes are kept."})
         base_size = self._request_size([{"role": "system", "content": system}])
-        target = max(base_size + 2800, 12_000 if limit == 16_000 else COMPACT_TARGET_BYTES)
-        summary_size = min(6400 if limit == CONTEXT_BUDGET_BYTES else 3500, max(1800, target - base_size - 1500))
+        target = max(base_size + int(2800 * scale),
+                     self._scaled_context_bytes(12_000, self._context_window()) if reduced_mode else normal_target)
+        target = min(limit - 100, target)
+        summary_minimum = 600 if scale < 1 else 1800
+        summary_size = min(int((3500 if reduced_mode else 6400) * scale),
+                           max(summary_minimum, target - base_size - int(1500 * scale)))
         if groups:
             start, end, valid = groups[-1]
             if valid and any(item.get("tool_name") == "read_working_history" for item in records[start:end]):
                 latest_size = len(json.dumps([self._model_record(item) for item in records[start:end]], ensure_ascii=False).encode("utf-8"))
-                target = max(target, min(limit - 100, base_size + latest_size + 2200))
-                summary_size = min(summary_size, max(1800, target - base_size - latest_size - 400))
+                target = max(target, min(limit - 100, base_size + latest_size + int(2200 * scale)))
+                summary_size = min(summary_size, max(summary_minimum, target - base_size - latest_size - 400))
         remaining = max(0, target - base_size - summary_size - 400)
         cut = len(records)
         for start, end, valid in reversed(groups):
@@ -769,7 +807,8 @@ class Agent:
         if force_compact and cut == 0:
             cut = groups[0][1] if groups else 0
         previous_count = marker[CONTEXT_STATE].get("compactions", 0) if marker else 0
-        state = {"schema": 1, "covered_messages": cut, "compactions": int(previous_count) + 1, "budget_bytes": limit}
+        state = {"schema": 1, "covered_messages": cut, "compactions": int(previous_count) + 1,
+                 "budget_bytes": limit, "context_tokens": self._context_window()}
         summary = self._handoff(records, cut, summary_size)
         new_marker = {"role": "system", "content": summary, CONTEXT_STATE: state}
         messages = self._compose_messages(system, records, new_marker)
@@ -777,6 +816,11 @@ class Agent:
             cut = next(end for start, end, _ in groups if start == cut)
             state["covered_messages"] = cut
             messages = self._compose_messages(system, records, new_marker)
+        while self._request_size(messages) > limit and len(new_marker["content"].encode("utf-8")) > 200:
+            new_marker["content"] = self._excerpt(new_marker["content"], len(new_marker["content"].encode("utf-8")) * 3 // 4)
+            messages = self._compose_messages(system, records, new_marker)
+        if self._request_size(messages) > limit:
+            raise ValueError("This model's context is too small for the required project instructions and tools. Choose a model with a larger context window; your full chat is saved.")
         self._check_cancelled()
         # Keep every original message. The marker changes only what the model sees.
         self.history = [new_marker] + records
@@ -843,7 +887,7 @@ class Agent:
         available_tools = self._available_tools()
         payload = json.dumps({"model": self.model, "messages": messages, "tools": available_tools,
                               "stream": True, "think": self.think, "keep_alive": "2m",
-                              "options": {**inference_options, "num_predict": 4096,
+                              "options": {**inference_options, "num_predict": min(4096, int(inference_options["num_ctx"]) // 4),
                                           "temperature": 0.2}}).encode("utf-8")
 
         def fetch():
