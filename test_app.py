@@ -11,13 +11,15 @@ import unittest
 from unittest.mock import patch
 
 import app
+import runtime
 
 
 class DesktopTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
         self.data = Path(self.temp.name).resolve()
-        self.patches = [patch.object(app, "DATA", self.data), patch.object(app, "STATE", self.data / "last-chat.json")]
+        self.patches = [patch.object(app, "DATA", self.data), patch.object(app, "STATE", self.data / "last-chat.json"),
+                        patch.object(runtime, "ROOT", self.data)]
         for item in self.patches:
             item.start()
         try:
@@ -393,6 +395,155 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.ui.update_button.cget("state"), "normal")
         self.assertEqual(self.ui.custom_download_button.cget("state"), "normal")
         self.assertIn("That file could not be imported.", self.ui.transcript.get("1.0", "end"))
+
+    def attachment(self, name="example.txt", content="Reference text"):
+        source = self.data / name
+        source.write_text(content, encoding="utf-8")
+        return runtime.prepare_attachment(source)
+
+    def test_attachment_only_send_passes_metadata_and_clears_chips(self):
+        item = self.attachment()
+        self.ui._add_attachments([item])
+        self.assertEqual(self.ui.pending_frame.winfo_manager(), "pack")
+        with patch.object(self.ui, "_start_run") as start:
+            self.ui.send()
+            start.assert_called_once_with("", attachments=[item])
+        self.assertFalse(self.ui.pending_attachments)
+        self.assertEqual(self.ui.pending_frame.winfo_manager(), "")
+        self.assertTrue(any(isinstance(widget, tk.Label) and widget.cget("text") == "example.txt"
+                            for widget in self.descendants(self.ui.transcript)))
+
+    def test_busy_attachments_queue_and_stop_discards_them(self):
+        item = self.attachment()
+        self.ui._set_busy(True)
+        self.ui._add_attachments([item])
+        self.ui.input.insert("1.0", "Read this too")
+        self.ui.send()
+        queued = self.ui.incoming.get_nowait()
+        self.assertEqual(queued, {"content": "Read this too", "attachments": [item]})
+        self.ui.incoming.put(queued)
+        self.ui.stop()
+        self.assertTrue(self.ui.incoming.empty())
+        self.assertIn("queued message(s) were not sent", self.ui.transcript.get("1.0", "end"))
+
+    def test_late_attachment_queue_keeps_each_message_and_attachment_pair(self):
+        first = self.attachment("first.txt", "First")
+        second = self.attachment("second.txt", "Second")
+        self.ui.busy = True
+        self.ui.incoming.put({"content": "First request", "attachments": [first]})
+        self.ui.incoming.put({"content": "Second request", "attachments": [second]})
+        with patch.object(self.ui, "_start_run") as start:
+            self.ui._handle_event("worker_complete", {"history": []}, 0)
+            start.assert_called_once_with("First request", attachments=[first], continuation=True)
+        self.assertEqual(self.ui.incoming.get_nowait(), {"content": "Second request", "attachments": [second]})
+        self.assertEqual(self.ui.queued_count, 1)
+
+    def test_known_nonvision_model_keeps_unsent_images_and_explains_inline(self):
+        image = {"id": "a" * 64, "name": "picture.png", "kind": "image", "path": "a" * 64 + ".png"}
+        self.ui._add_attachments([image])
+        self.ui.model_vision_support = False
+        self.ui.input.insert("1.0", "Describe this")
+        with patch.object(self.ui, "_start_run") as start:
+            self.ui.send()
+            start.assert_not_called()
+        self.assertIn("cannot read images", self.ui.status_label.cget("text"))
+        self.assertEqual(self.ui.pending_attachments, [image])
+        self.assertEqual(self.ui.input.get("1.0", "end-1c"), "Describe this")
+
+    def test_smaller_context_limits_images_without_consuming_the_message(self):
+        images = [{"id": digit * 64, "name": digit + ".png", "kind": "image", "path": digit * 64 + ".png"}
+                  for digit in "ab"]
+        self.ui._add_attachments(images)
+        self.ui.model_vision_support = True
+        self.ui.model_context_tokens = 8192
+        with patch.object(self.ui, "_start_run") as start:
+            self.ui.send()
+            start.assert_not_called()
+        self.assertIn("one image per message", self.ui.status_label.cget("text"))
+        self.assertEqual(len(self.ui.pending_attachments), 2)
+
+    def test_chips_remove_clear_and_ignore_previous_chat_preparation(self):
+        first, second = self.attachment("a.txt", "A"), self.attachment("b.txt", "B")
+        self.ui._add_attachments([first, second, first])
+        self.assertEqual(len(self.ui.pending_attachments), 2)
+        self.ui._remove_attachment(first["id"])
+        self.assertEqual(self.ui.pending_attachments, [second])
+        old_epoch = self.ui.attachment_epoch
+        self.ui.new_chat()
+        self.ui._handle_event("attachments_prepared", {"epoch": old_epoch, "items": [first]}, None)
+        self.assertFalse(self.ui.pending_attachments)
+        self.assertEqual(self.ui.attachment_jobs, 0)
+
+    def wait_for_attachments(self):
+        deadline = time.monotonic() + 5
+        while self.ui.attachment_jobs and time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(0.01)
+        self.assertEqual(self.ui.attachment_jobs, 0, "Attachment preparation did not finish")
+
+    def test_clipboard_plain_text_replaces_selection_without_attachment(self):
+        self.ui.input.insert("1.0", "replace me")
+        self.ui.input.tag_add("sel", "1.0", "end-1c")
+        with patch.object(self.root, "clipboard_get", return_value="pasted text"), \
+             patch("runtime.clipboard_attachments", return_value=[]):
+            self.assertEqual(self.ui._paste_input(), "break")
+            self.wait_for_attachments()
+        self.assertEqual(self.ui.input.get("1.0", "end-1c"), "pasted text")
+        self.assertFalse(self.ui.pending_attachments)
+
+    def test_clipboard_files_are_attached_instead_of_pasted_as_text(self):
+        item = self.attachment()
+        with patch.object(self.root, "clipboard_get", return_value="ignored file name"), \
+             patch("runtime.clipboard_attachments", return_value=[item]):
+            self.ui._paste_input()
+            self.wait_for_attachments()
+        self.assertEqual(self.ui.pending_attachments, [item])
+        self.assertEqual(self.ui.input.get("1.0", "end-1c"), "")
+
+    def test_stored_chat_shows_original_prompt_and_missing_file_error(self):
+        item = self.attachment(content="DO NOT DISPLAY THE EXPANDED FILE CONTENTS")
+        self.ui.history = [runtime.build_user_message("Review this file", [item])]
+        self.ui._save_state()
+        self.ui.history = []
+        self.ui._load_state()
+        self.ui._render_history()
+        transcript = self.ui.transcript.get("1.0", "end")
+        self.assertIn("Review this file", transcript)
+        self.assertNotIn("DO NOT DISPLAY THE EXPANDED FILE CONTENTS", transcript)
+        runtime.resolve_attachment_path(item).unlink()
+        self.ui._open_attachment(item)
+        self.assertIn("missing", self.ui.status_label.cget("text"))
+
+    def test_script_attachment_opens_in_notepad_without_execution(self):
+        item = self.attachment("example.ps1", "Write-Output 'Do not run this'")
+        with patch("app.subprocess.Popen") as launch, patch("app.os.startfile") as startfile:
+            self.ui._open_attachment(item)
+            launch.assert_called_once()
+            command = launch.call_args.args[0]
+            self.assertEqual(Path(command[0]).name.lower(), "notepad.exe")
+            self.assertEqual(command[1], str(runtime.resolve_attachment_path(item)))
+            startfile.assert_not_called()
+
+    def test_actual_image_normalization_and_inline_preview(self):
+        source = self.data / "small.png"
+        picture = tk.PhotoImage(width=32, height=24)
+        picture.put("#4ca889", to=(0, 0, 32, 24))
+        picture.write(str(source), format="png")
+        item = runtime.prepare_attachment(source)
+        self.assertTrue(runtime.resolve_attachment_path(item, preview=True).is_file())
+        self.ui._add_attachments([item])
+        self.assertEqual(len(self.ui.pending_previews), 1)
+        self.ui._render_attachments([item])
+        self.assertEqual(len(self.ui.chat_previews), 1)
+        self.assertLessEqual(self.ui.chat_previews[0].width(), 220)
+
+    def test_coding_preset_fills_exact_model_without_download(self):
+        with patch("runtime.pull_model") as download:
+            self.ui.coding_preset_var.set("Larger model · Qwen 3.5 9B")
+            self.ui._coding_preset_changed()
+            download.assert_not_called()
+        self.assertEqual(self.ui.download_name_var.get(), "qwen3.5:9b-q4_K_M")
+        self.assertIn("8 GB", self.ui.coding_preset_note.cget("text"))
 
     def test_question_callback_integrates_with_agent_and_saved_history(self):
         from agent_core import Agent
