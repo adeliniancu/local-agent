@@ -86,7 +86,8 @@ class Agent:
                  approve: Callable[[str, str], bool], cancel_event: threading.Event,
                  model: str = MODEL, base_url: str = BASE_URL, *,
                  ask_user: Callable[[str, list[str]], str | None] | None = None,
-                 poll_messages: Callable[[], list[str]] | None = None, think: bool = False):
+                 poll_messages: Callable[[], list[str]] | None = None, think: bool = False,
+                 performance_profile: str = "auto"):
         self.workspace = Path(workspace).expanduser().resolve(strict=True)
         if not self.workspace.is_dir():
             raise ValueError("Choose an existing project folder.")
@@ -103,6 +104,7 @@ class Agent:
         self.ask_user = ask_user
         self.poll_messages = poll_messages
         self.think = bool(think)
+        self.performance_profile = performance_profile
         self.history: list[dict] = []
         self.plan: list[dict] = []
         self._denied = False
