@@ -96,11 +96,24 @@ class ResponseRecoveryTests(unittest.TestCase):
         agent, requests = self.agent_with_responses([
             [{'message': {'thinking': 'unfinished reasoning'}}, {'done': True, 'done_reason': 'length'}],
         ], emit=emit)
-        agent.run('Do work')
+        with patch.object(agent, '_mark_images_processed') as mark_images:
+            agent.run('Do work')
+        mark_images.assert_not_called()
         self.assertEqual(len(requests), 1)
         self.assertTrue(any(item.get('_response_truncated') for item in agent.history))
         self.assertEqual(self.events[-1][0], 'done')
         self.assertFalse(agent._response_recovery)
+
+    def test_recovery_sampling_uses_its_effective_reasoning_mode(self):
+        agent, requests = self.agent_with_responses([
+            [{'message': {'thinking': 'Incomplete thought'}}, {'done': True, 'done_reason': 'length'}],
+            [{'message': {'content': 'Could not complete the task.'}}, {'done': True}],
+        ])
+        with patch('agent_core.runtime.get_generation_options', side_effect=lambda model, think: {'temperature': .6 if think else .2}) as sampling:
+            agent.run('Inspect the issue')
+        self.assertEqual([call.args[1] for call in sampling.call_args_list], [True, False])
+        self.assertEqual([request['options']['temperature'] for request in requests], [.6, .2])
+        self.assertTrue(agent.think)
 
     def test_recovery_still_requires_command_approval(self):
         agent, requests = self.agent_with_responses([
