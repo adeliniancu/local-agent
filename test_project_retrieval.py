@@ -55,6 +55,16 @@ class ProjectRetrievalTests(unittest.TestCase):
         with self.assertRaises(InterruptedError):
             runtime.retrieve_project_context(self.root, 'atomic JSON', cancel_event=cancel)
 
+    def test_automatic_retrieval_skips_obvious_credentials_and_keys(self):
+        for name in ('.env', '.env.local', 'credentials.json', 'service_account.json', 'private.key'):
+            (self.root / name).write_text('atomic JSON fixture-private-marker')
+        (self.root / '.AWS').mkdir()
+        (self.root / '.AWS' / 'config').write_text('atomic JSON fixture-private-marker')
+        (self.root / 'main.py').write_text('# atomic JSON records\n')
+        result = runtime.retrieve_project_context(self.root, 'atomic JSON')
+        self.assertEqual([item['path'] for item in result['passages']], ['main.py'])
+        self.assertNotIn('fixture-private-marker', json.dumps(result))
+
     def test_link_to_outside_workspace_cannot_supply_context(self):
         with tempfile.TemporaryDirectory() as outside:
             private = Path(outside) / 'private.py'

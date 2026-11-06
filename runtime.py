@@ -188,7 +188,8 @@ def retrieve_project_context(workspace, query, *, path=".", cancel_event=None, m
         raise ValueError("Use a project search query of at most 2000 characters.")
     if type(max_bytes) is not int or not 800 <= max_bytes <= 8000:
         raise ValueError("Retrieval output must be between 800 and 8000 bytes.")
-    ignored = {".git", "node_modules", "__pycache__", ".venv", "venv", ".localagent-backups", ".localagent-runs"}
+    ignored = {".git", "node_modules", "__pycache__", ".venv", "venv", ".localagent-backups", ".localagent-runs",
+               ".ssh", ".aws", ".azure", ".gnupg", ".secrets", "credentials", "secrets"}
     stop = set("the a an to in of for and or is are be with this that how where find code function project file does do".split())
     def tokens(value):
         value = re.sub(r"([a-z])([A-Z])", r"\1 \2", value)
@@ -205,7 +206,7 @@ def retrieve_project_context(workspace, query, *, path=".", cancel_event=None, m
             dirs[:] = []
             continue
         depth = len(current.relative_to(selected).parts)
-        dirs[:] = sorted(d for d in dirs if d not in ignored and depth < 4
+        dirs[:] = sorted(d for d in dirs if d.casefold() not in ignored and depth < 4
                          and not (current / d).is_symlink() and not (current / d).is_junction()
                          and (current / d).resolve().is_relative_to(root))
         for name in sorted(files):
@@ -214,6 +215,12 @@ def retrieve_project_context(workspace, query, *, path=".", cancel_event=None, m
                 limited = True
                 break
             candidate = current / name
+            lower = name.casefold()
+            if (lower == ".env" or lower.startswith(".env.")
+                    or lower in {"id_rsa", "id_ed25519", "id_dsa", "id_ecdsa"}
+                    or any(word in lower for word in ("credential", "secret", "service_account", "service-account"))
+                    or candidate.suffix.casefold() in {".pem", ".key", ".p12", ".pfx"}):
+                continue
             if candidate.is_symlink() or not candidate.resolve().is_relative_to(root):
                 continue
             scanned += 1
