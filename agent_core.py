@@ -148,6 +148,8 @@ class Agent:
     def _read_file(self, path: Path) -> dict:
         path = self._path(str(path))
         if not path.is_file():
+            if not path.exists():
+                self._file_versions.pop(path, None)
             raise ValueError("File does not exist or is not a regular file. Use list_files to check its path.")
         with path.open("rb") as handle:
             raw = handle.read(MAX_FILE_BYTES + 1)
@@ -234,7 +236,7 @@ class Agent:
             backup.parent.mkdir(parents=True, exist_ok=True)
             backup.write_bytes(original)
         elif path in self._file_versions:
-            raise ValueError("The file disappeared since your last read. No file was recreated. Inspect the project before deciding whether to create a replacement.")
+            raise ValueError("The file disappeared since your last read. No file was recreated. Read the path again to confirm it is absent before creating a replacement.")
         path.parent.mkdir(parents=True, exist_ok=True)
         self._check_cancelled()
         temp_name = None

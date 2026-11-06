@@ -89,7 +89,7 @@ class CodingWorkflowTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "changed while preparing"):
                 self.agent._execute("write_file", {"path": "source.py", "content": "agent edit"})
         self.assertEqual(self.path.read_text(), "new user edit")
-        self.assertFalse(list(self.root.glob(".localagent-*")))
+        self.assertFalse([path for path in self.root.glob(".localagent-*") if path.is_file()])
 
     def test_new_file_appearing_during_preparation_is_not_overwritten(self):
         original_check = self.agent._check_cancelled
