@@ -1,6 +1,7 @@
 """Attachment refs persist; bounded visual payloads do not pollute saved history."""
 import base64
 import hashlib
+import http.server
 import json
 from pathlib import Path
 import struct
@@ -85,6 +86,39 @@ class AttachmentCoreTests(unittest.TestCase):
         self.assertEqual(sum(item["role"] == "user" for item in self.agent._records()), 1)
         self.assertTrue(self.agent._records()[0]["_images_processed"])
         self.assertNotIn(base64.b64encode(self.png).decode(), json.dumps(self.agent.history))
+        self.assertFalse([data for kind, data in self.events if kind == "error"])
+
+    def test_reinspection_reaches_the_actual_ollama_http_payload(self):
+        (self.workspace / "source.txt").write_text("Project source")
+        requests = []
+        image_id = self.image["id"]
+        class Handler(http.server.BaseHTTPRequestHandler):
+            def do_POST(handler):
+                requests.append(json.loads(handler.rfile.read(int(handler.headers["Content-Length"]))))
+                if len(requests) == 1:
+                    function = {"name": "read_file", "arguments": {"path": "source.txt"}}
+                elif len(requests) == 2:
+                    function = {"name": "read_attachment", "arguments": {"attachment_id": image_id}}
+                else:
+                    function = None
+                message = ({"content": "", "tool_calls": [{"function": function}]} if function
+                           else {"content": "The image is red."})
+                handler.send_response(200)
+                handler.send_header("Content-Type", "application/x-ndjson")
+                handler.end_headers()
+                handler.wfile.write(json.dumps({"message": message, "done": True}).encode() + b"\n")
+            def log_message(self, *_):
+                pass
+        server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        server.daemon_threads = True
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
+        self.addCleanup(server.shutdown)
+        self.agent.base_url = f"http://127.0.0.1:{server.server_port}"
+        self.agent.run("Inspect the source and reference", [self.image])
+        self.assertEqual([sum(len(message.get("images", [])) for message in request["messages"])
+                          for request in requests], [1, 0, 1])
+        self.assertEqual(base64.b64decode(requests[-1]["messages"][-1]["images"][0]), self.png)
         self.assertFalse([data for kind, data in self.events if kind == "error"])
 
     def test_image_reinspection_checks_vision_and_registration(self):
