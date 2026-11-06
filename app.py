@@ -1680,7 +1680,7 @@ class LocalAgentApp:
             arguments = payload.get("arguments", {})
             labels = {"list_files": "LOOKING THROUGH FILES", "read_file": "READING FILE", "write_file": "WRITING FILE",
                       "replace_text": "EDITING FILE", "search_files": "SEARCHING FILES", "run_command": "RUNNING COMMAND",
-                      "ask_user": "ASKING A QUESTION", "set_plan": "UPDATING THE PLAN"}
+                      "ask_user": "ASKING A QUESTION", "set_plan": "UPDATING THE PLAN", "launch_python_app": "LAUNCHING APP"}
             self._append(labels.get(name, name.upper()) + "\n", "tool_role")
             if isinstance(arguments, dict):
                 preview = arguments.get("command") or arguments.get("path") or arguments.get("query") or arguments.get("question") or "."
