@@ -10,7 +10,7 @@ Choose a project folder and describe a task. Enter sends a message; Shift+Enter 
 
 ## Working with the agent
 
-The agent can inspect files, make edits, search a project, and run approved PowerShell commands. Commands run with your Windows user permissions. File-tool overwrites keep local backups. Questions and command approvals appear inside the chat. Questions offer choices and a custom answer. Command cards offer Allow once and Reject; the visible Always allow commands in this chat checkbox controls repeated approvals for the current chat.
+The agent can inspect files, make edits, search a project, and run approved PowerShell commands. Commands run with your Windows user permissions. File-tool overwrites keep local backups. Questions and command approvals stay pinned above the message box, including in smaller windows. Their answer buttons remain visible while the question or command body scrolls. Questions offer choices and a custom answer. Don't ask again in this chat (questions) lets the AI decide routine implementation details; it does not approve commands or invent missing facts. This choice resets with a new or reopened chat. Command cards offer Allow once and Reject; the visible Always allow commands in this chat checkbox controls repeated approvals for the current chat.
 
 The working timer shows elapsed time. Token speed is the actual generation rate reported by Ollama for the latest completed model step. Reason more enables the model's extra reasoning mode and can take longer. Plans show progress for larger tasks.
 

@@ -117,7 +117,7 @@ class DesktopTests(unittest.TestCase):
             self.ui._show_approval(request)
         card = self.ui.approval_window
         self.assertIsInstance(card, tk.Frame)
-        self.assertIs(card.master, self.ui.transcript)
+        self.assertIs(self.ui.prompt_panel.master, self.ui.footer_frame)
         command_text = next(child for child in self.descendants(card) if isinstance(child, tk.Text))
         self.assertEqual(command_text.get("1.0", "end-1c"), command)
         self.assertFalse(request["event"].is_set())
@@ -140,13 +140,63 @@ class DesktopTests(unittest.TestCase):
             self.ui._show_question(request)
         card = self.ui.question_window
         self.assertIsInstance(card, tk.Frame)
-        self.assertIs(card.master, self.ui.transcript)
-        widgets = list(self.descendants(card))
+        self.assertIs(self.ui.prompt_panel.master, self.ui.footer_frame)
+        widgets = list(self.descendants(self.ui.prompt_panel))
         next(child for child in widgets if isinstance(child, tk.Radiobutton) and child.cget("text") == "Python").invoke()
         next(child for child in widgets if isinstance(child, tk.Button) and child.cget("text") == "Send answer").invoke()
         self.assertTrue(request["event"].is_set())
         self.assertEqual(request["answer"], "Python")
         self.assertIsNone(self.ui.question_window)
+
+    def test_question_delegation_does_not_grant_command_permission(self):
+        request = {"question": "Which color?", "options": ["Blue", "Green"],
+                   "event": threading.Event(), "answer": None}
+        self.ui._show_question(request)
+        self.ui.decide_questions_box.invoke()
+        self.assertTrue(request["event"].is_set())
+        self.assertIn("best judgment", request["answer"])
+        self.assertFalse(self.ui.allow_commands.is_set())
+        self.assertIsNone(self.ui.prompt_panel)
+        another = {"question": "Which font?", "options": [], "event": threading.Event(), "answer": None}
+        self.ui._show_question(another)
+        self.assertTrue(another["event"].is_set())
+        self.assertIsNone(self.ui.prompt_panel)
+        self.ui.new_chat()
+        self.assertFalse(self.ui.decide_questions_var.get())
+
+    def test_small_window_keeps_question_actions_visible_when_chat_scrolled(self):
+        self.root.attributes("-alpha", 0)
+        self.root.deiconify()
+        self.root.geometry("840x620")
+        self.root.update()
+        self.ui._append("Old output\n" * 200)
+        request = {"question": "Choose carefully. " * 100, "options": ["Option " + str(i) + " text" * 50 for i in range(4)],
+                   "event": threading.Event(), "answer": None}
+        self.ui._show_question(request)
+        self.root.update()
+        button = next(w for w in self.descendants(self.ui.prompt_panel)
+                      if isinstance(w, tk.Button) and w.cget("text") == "Send answer")
+        position = button.winfo_rooty()
+        self.ui.transcript.yview_moveto(0)
+        self.root.update()
+        self.assertEqual(position, button.winfo_rooty())
+        self.assertGreaterEqual(position, self.root.winfo_rooty())
+        self.assertLessEqual(position + button.winfo_height(), self.root.winfo_rooty() + self.root.winfo_height())
+        self.assertLessEqual(self.ui.send_button.winfo_rooty() + self.ui.send_button.winfo_height(),
+                             self.root.winfo_rooty() + self.root.winfo_height())
+        self.ui._answer_question("Blue")
+        self.root.withdraw()
+
+    def test_pinned_command_checkbox_allows_current_and_future_commands(self):
+        request = {"command": "Write-Output test", "cwd": str(self.ui.workspace),
+                   "event": threading.Event(), "allowed": False}
+        self.ui._show_approval(request)
+        box = next(w for w in self.descendants(self.ui.prompt_panel) if isinstance(w, tk.Checkbutton))
+        box.invoke()
+        self.assertTrue(request["allowed"])
+        self.assertTrue(request["event"].is_set())
+        self.assertIsNone(self.ui.prompt_panel)
+        self.assertFalse(self.ui.decide_questions_var.get())
 
     def test_stop_resolves_inline_approval_without_running_command(self):
         self.ui._set_busy(True)
