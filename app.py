@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import queue
+import subprocess
 import sys
 import threading
 import time
@@ -22,6 +23,11 @@ DEFAULT_MODEL = "qwen3.5:4b-q4_K_M"
 PROFILE_LABELS = {
     "auto": "Auto", "rtx5060": "RTX 5060 desktop", "rtx4070_laptop": "RTX 4070 laptop",
     "rtx5080": "RTX 5080 desktop", "cpu": "CPU",
+}
+CODING_MODELS = {
+    "Fast / smaller · Qwen 3.5 4B": (DEFAULT_MODEL, "About 3.3 GB. The default for this app."),
+    "Quality trial · Qwen 3.5 9B": ("qwen3.5:9b", "About 6.6 GB. May be slower or use system RAM on an 8 GB GPU."),
+    "Advanced · Qwen3 Coder 30B": ("qwen3-coder:30b", "About 19 GB. For 16 GB+ GPUs with enough system RAM; not an 8 GB GPU default."),
 }
 try:
     from version import __version__ as APP_VERSION
@@ -52,7 +58,12 @@ class LocalAgentApp:
         self.updating = False
         self.cancel = threading.Event()
         self.allow_commands = threading.Event()
-        self.incoming: queue.Queue[str] = queue.Queue()
+        self.incoming: queue.Queue = queue.Queue()
+        self.pending_attachments: list[dict] = []
+        self.attachment_jobs = 0
+        self.attachment_epoch = 0
+        self.pending_previews = []
+        self.chat_previews = []
         self.queued_count = 0
         self.work_started: float | None = None
         self.elapsed_seconds = 0.0
@@ -64,6 +75,8 @@ class LocalAgentApp:
         self.model_tool_support: bool | None = None
         self.model_thinking_support: bool | None = None
         self.model_context_support: bool | None = None
+        self.model_vision_support: bool | None = None
+        self.model_context_tokens: int | None = None
         self.model_info_name = ""
         self.model_checking = False
         self.model_check_serial = 0
@@ -268,6 +281,15 @@ class LocalAgentApp:
         self.model_capability_label = self._label(self.settings_panel, "Tool support: not checked yet.", size=8,
                                                  color=COLORS["muted"], wraplength=500, justify="left", anchor="w")
         self.model_capability_label.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(7, 0))
+        self._label(self.settings_panel, "Coding presets", size=9).grid(row=6, column=0, sticky="w", padx=(0, 9), pady=(8, 0))
+        self.coding_preset_var = tk.StringVar(value=next(iter(CODING_MODELS)))
+        self.coding_preset_box = ttk.Combobox(self.settings_panel, textvariable=self.coding_preset_var,
+                                             values=list(CODING_MODELS), state="readonly", font=("Segoe UI", 9))
+        self.coding_preset_box.grid(row=6, column=1, columnspan=3, sticky="ew", pady=(8, 0))
+        self.coding_preset_box.bind("<<ComboboxSelected>>", self._coding_preset_changed)
+        self.coding_preset_note = self._label(self.settings_panel, "Choose a preset to fill the download name. Download starts only when you click Download.",
+                                             size=8, color=COLORS["muted"], wraplength=500, justify="left", anchor="w")
+        self.coding_preset_note.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(5, 0))
 
         self.setup_bar = tk.Frame(main, bg=COLORS["panel"], padx=12, pady=10)
         self._label(self.setup_bar, "Download your local model\nonce to get started.", size=9,
@@ -317,6 +339,21 @@ class LocalAgentApp:
         self.input.bind("<Return>", self._send_key)
         self.input.bind("<Shift-Return>", self._newline_key)
         self.input.bind("<Control-Return>", self._send_key)
+        self.input.bind("<Control-v>", self._paste_input)
+        self.input.bind("<Control-V>", self._paste_input)
+        self.input.bind("<<Paste>>", self._paste_input)
+        self.input.bind("<Button-3>", lambda event: self._text_menu(event, self.input, editable=True))
+        self.transcript.bind("<Button-3>", lambda event: self._text_menu(event, self.transcript))
+        self.pending_frame = tk.Frame(composer, bg=COLORS["panel"])
+        self.pending_canvas = tk.Canvas(self.pending_frame, height=38, highlightthickness=0, bg=COLORS["panel"])
+        self.pending_canvas.pack(side="left", fill="x", expand=True)
+        self.pending_chips = tk.Frame(self.pending_canvas, bg=COLORS["panel"])
+        self.pending_canvas.create_window(0, 0, window=self.pending_chips, anchor="nw")
+        self.pending_chips.bind("<Configure>", lambda _event: self.pending_canvas.configure(scrollregion=self.pending_canvas.bbox("all")))
+        self.pending_canvas.bind("<MouseWheel>", lambda event: self.pending_canvas.xview_scroll(-1 if event.delta > 0 else 1, "units"))
+        self.clear_attachments_button = self._button(self.pending_frame, "Clear", self.clear_attachments)
+        self.clear_attachments_button.configure(pady=4, padx=8, font=("Segoe UI", 8))
+        self.clear_attachments_button.pack(side="right", padx=(5, 0))
         self.always_allow_var = tk.BooleanVar(value=False)
         self.always_allow_box = tk.Checkbutton(composer, text="Always allow commands in this chat",
                          variable=self.always_allow_var, command=self._toggle_command_permission,
@@ -326,7 +363,10 @@ class LocalAgentApp:
         self.always_allow_box.pack(anchor="w", padx=10, pady=(0, 6))
         composer_actions = tk.Frame(composer, bg=COLORS["panel"])
         composer_actions.pack(fill="x", padx=12, pady=(0, 10))
-        self._label(composer_actions, "Enter to send · Shift+Enter for a new line", size=8, color=COLORS["muted"]).pack(side="left")
+        self.attach_button = self._button(composer_actions, "Attach files", self.attach_files)
+        self.attach_button.configure(padx=9, pady=8, font=("Segoe UI", 9))
+        self.attach_button.pack(side="left")
+        self._label(composer_actions, "Enter sends · Shift+Enter newline", size=8, color=COLORS["muted"]).pack(side="left", padx=(8, 0))
         self.send_button = self._button(composer_actions, "Send  ↑", self.send, primary=True, state="disabled")
         self.send_button.pack(side="right")
         self.stop_button = self._button(composer_actions, "Stop", self.stop, state="disabled")
