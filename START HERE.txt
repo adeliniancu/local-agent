@@ -38,6 +38,25 @@ CHAT CONTROLS
   it appears after a response has finished.
 - The agent can show a short plan and update its steps as it works.
 
+FILES AND IMAGES IN CHAT
+
+- Use Attach files beside the message box, or Ctrl+V to paste a screenshot
+  or files copied in Explorer. Plain text paste works too. Right-click the
+  message box or conversation for copy/paste options.
+- Pending attachments appear above the message box and can be removed.
+  Send an attachment alone or with instructions, including while work runs.
+- Text/code, CSV, JSON, Markdown, DOCX text, and PNG/JPEG/GIF/BMP images
+  are supported. Each file must be 25 MB or smaller. Up to eight attachments
+  fit in a message, with four images at 16K context or one at 8K context.
+- Images need a vision-capable model, such as the default Qwen3.5 model.
+  A text-only coding model cannot see screenshots. Images are resized for
+  inference, and GIF files use a single frame.
+- Large text is excerpted initially; the agent can read more precise sections.
+  DOCX images/layout and PDF files are not read. Export text or use screenshots
+  for these cases. Image generation is not included.
+- Attachments are copied into the local data folder and remain with saved chats.
+  They are never included in automatic GitHub source uploads or app updates.
+
 MODELS AND PERFORMANCE
 
 Open Models & performance at the top of the chat to change these settings.
@@ -53,6 +72,9 @@ Open Models & performance at the top of the chat to change these settings.
   file, then click Import. Choosing a file alone does not import it.
 - After downloading or importing, the model is selected in the sidebar.
   You can switch back to another installed model there.
+- Presets offer the fast Qwen3.5 4B model and larger Qwen3.5 9B model.
+  The 9B download is about 6.6 GB and may run more slowly on an 8 GB GPU.
+  Selecting a preset only fills the model name; Download starts the transfer.
 
 Agent work needs a model with tool calling and at least 8,192 context tokens.
 The app uses up to 16,384 context tokens when the model supports them.
@@ -76,6 +98,11 @@ Click Stop to cancel the current task and discard follow-ups still queued.
 Stop does not undo changes already made. File-tool overwrites keep copies
 in .localagent-backups inside the project. Changes made by terminal commands
 do not automatically get backups.
+
+The agent checks existing files before editing and can replace an exact,
+unique block rather than rewriting a whole file. Stale reads and ambiguous
+matches are rejected with a request to inspect the current file. Coding
+instructions emphasize checking results before claiming that a fix works.
 
 The app saves your last chat automatically. New chat archives the previous
 conversation; use Saved chats to reopen it. A small local model may need
