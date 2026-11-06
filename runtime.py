@@ -210,6 +210,9 @@ def retrieve_project_context(workspace, query, *, path=".", cancel_event=None, m
                          and (current / d).resolve().is_relative_to(root))
         for name in sorted(files):
             cancelled()
+            if scanned >= 200 or total >= 16 * 1024 * 1024 or len(passages) >= 1000:
+                limited = True
+                break
             candidate = current / name
             if candidate.is_symlink() or not candidate.resolve().is_relative_to(root):
                 continue
