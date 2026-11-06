@@ -529,6 +529,17 @@ class DesktopTests(unittest.TestCase):
             commands["Paste"]()
             paste.assert_called_once()
 
+    def test_two_quick_pastes_keep_their_order(self):
+        with patch.object(self.root, "clipboard_get", side_effect=["first ", "second"]), \
+             patch.object(self.ui, "_prepare_attachments") as prepare:
+            self.ui._paste_input()
+            self.ui._paste_input()
+        requests = [call.kwargs for call in prepare.call_args_list]
+        for request in requests:
+            self.ui._handle_event("attachments_prepared", {"epoch": self.ui.attachment_epoch, "items": [],
+                                  "paste": request["fallback_text"], "paste_marks": request["paste_marks"]}, None)
+        self.assertEqual(self.ui.input.get("1.0", "end-1c"), "first second")
+
     def test_unsupported_file_preparation_fails_inline_without_clearing_text(self):
         source = self.data / "paper.pdf"
         source.write_bytes(b"%PDF-test")

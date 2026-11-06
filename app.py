@@ -1415,7 +1415,19 @@ class LocalAgentApp:
                 if marks.get("start") and marks.get("end"):
                     self.input.delete(marks["start"], marks["end"])
                 destination = marks.get("insert", "insert")
+                # Several quick pastes can finish out of order. Later paste
+                # positions at this same cursor belong after this insertion.
+                later_marks = []
+                if destination.startswith("attachment_paste_"):
+                    sequence = int(destination.split("_")[2])
+                    for name in self.input.mark_names():
+                        if (name.startswith("attachment_paste_") and int(name.split("_")[2]) > sequence
+                                and self.input.compare(name, "==", destination)):
+                            self.input.mark_gravity(name, "right")
+                            later_marks.append(name)
                 self.input.insert(destination, payload["paste"])
+                for name in later_marks:
+                    self.input.mark_gravity(name, "left")
             for mark in marks.values():
                 self.input.mark_unset(mark)
             errors = payload.get("errors", [])
