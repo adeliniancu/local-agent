@@ -99,6 +99,62 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(request["event"].is_set())
         self.assertTrue(self.ui.incoming.empty())
 
+    @staticmethod
+    def descendants(widget):
+        for child in widget.winfo_children():
+            yield child
+            yield from DesktopTests.descendants(child)
+
+    def test_command_approval_is_inline_and_always_allow_is_visible(self):
+        self.ui._set_busy(True)
+        command = "Write-Output '" + "complete command text " * 100 + "'"
+        request = {"command": command, "cwd": str(self.ui.workspace),
+                   "event": threading.Event(), "allowed": False}
+        with patch("app.tk.Toplevel", side_effect=AssertionError("AI approvals must not open popups")):
+            self.ui._show_approval(request)
+        card = self.ui.approval_window
+        self.assertIsInstance(card, tk.Frame)
+        self.assertIs(card.master, self.ui.transcript)
+        command_text = next(child for child in self.descendants(card) if isinstance(child, tk.Text))
+        self.assertEqual(command_text.get("1.0", "end-1c"), command)
+        self.assertFalse(request["event"].is_set())
+        self.assertEqual(self.ui.always_allow_box.winfo_manager(), "pack")
+        self.ui.always_allow_box.invoke()
+        self.assertTrue(request["event"].is_set())
+        self.assertTrue(request["allowed"])
+        self.assertTrue(self.ui.allow_commands.is_set())
+        self.assertIsNone(self.ui.approval_window)
+        self.ui.busy = False
+        self.ui.new_chat()
+        self.assertFalse(self.ui.always_allow_var.get())
+        self.assertFalse(self.ui.allow_commands.is_set())
+
+    def test_question_choices_are_inline_and_submit_without_popup(self):
+        self.ui._set_busy(True)
+        request = {"question": "Which language should I use?", "options": ["Python", "Java"],
+                   "event": threading.Event(), "answer": None}
+        with patch("app.tk.Toplevel", side_effect=AssertionError("AI questions must not open popups")):
+            self.ui._show_question(request)
+        card = self.ui.question_window
+        self.assertIsInstance(card, tk.Frame)
+        self.assertIs(card.master, self.ui.transcript)
+        widgets = list(self.descendants(card))
+        next(child for child in widgets if isinstance(child, tk.Radiobutton) and child.cget("text") == "Python").invoke()
+        next(child for child in widgets if isinstance(child, tk.Button) and child.cget("text") == "Send answer").invoke()
+        self.assertTrue(request["event"].is_set())
+        self.assertEqual(request["answer"], "Python")
+        self.assertIsNone(self.ui.question_window)
+
+    def test_stop_resolves_inline_approval_without_running_command(self):
+        self.ui._set_busy(True)
+        request = {"command": "Write-Output test", "cwd": str(self.ui.workspace),
+                   "event": threading.Event(), "allowed": False}
+        self.ui._show_approval(request)
+        self.ui.stop()
+        self.assertTrue(request["event"].is_set())
+        self.assertFalse(request["allowed"])
+        self.assertIsNone(self.ui.approval_window)
+
     def test_speed_uses_model_metrics_and_elapsed_uses_wall_time(self):
         self.ui._set_busy(True)
         self.ui.work_started = 100.0

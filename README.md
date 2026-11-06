@@ -26,9 +26,11 @@ The Update button checks the configured GitHub release channel. It can also inst
 
 A version-one installation can use Install Update.cmd from the update package once to receive the new Update button.
 
-The repository includes automated tests and release packaging. Pushing a version tag runs tests, builds a Windows first-install package and a small app update, and publishes them together. The model is downloaded separately on first use, so app releases do not repeatedly transfer model weights.
+The owner's development PC automatically commits and pushes saved app source changes to main. Its background source watcher starts with Windows and waits briefly for file writes to settle. There is no manual release step after editing. It retries when the internet connection returns and records its status locally.
 
-To publish another version, update the version number, commit and push the source changes, then push a matching version tag. The Update button receives published releases; editing local source files alone does not update another computer.
+Each push starts GitHub tests and packaging. GitHub assigns the release version and publishes the Windows first-install package, small app update, and update feed together after checks pass. A newer push replaces an unfinished older build. Failed checks keep the previous published release available.
+
+The model is downloaded separately on first use, so app releases do not repeatedly transfer model weights. Installed release-version metadata is ignored by the source watcher to prevent an app update from triggering another release. The watcher runs only on the owner's development PC; it is not part of the app distributed to friends.
 
 ## Requirements and privacy
 

@@ -2,14 +2,14 @@ name: Windows release
 
 on:
   push:
-    tags: ['v*']
+    branches: [main]
 
 permissions:
   contents: read
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: local-agent-release-${{ github.repository }}
+  cancel-in-progress: true
 
 jobs:
   test:
@@ -18,18 +18,22 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.15.0'
           architecture: x64
+      - name: Assign this push's release version
+        shell: pwsh
+        run: python ci_release.py prepare --run-number "$env:GITHUB_RUN_NUMBER" --output dist/release-plan.json
       - name: Unit and desktop tests (no model download)
         shell: pwsh
         run: python -m unittest discover -s . -p 'test_*.py' -v
 
   publish:
     needs: test
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 60
     permissions:
@@ -37,35 +41,41 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.sha }}
           persist-credentials: false
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.15.0'
           architecture: x64
+      - name: Assign the tested release version
+        shell: pwsh
+        run: python ci_release.py prepare --run-number "$env:GITHUB_RUN_NUMBER" --output dist/release-plan.json
       - name: Build portable installer and update
         shell: pwsh
-        env:
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          python build_release.py --tag "$env:RELEASE_TAG" --repository "$env:GITHUB_REPOSITORY" --output-dir dist/release
+          $plan = Get-Content -LiteralPath 'dist/release-plan.json' -Raw | ConvertFrom-Json
+          python build_release.py --tag "$($plan.tag)" --repository "$env:GITHUB_REPOSITORY" --output-dir dist/release
           if ($LASTEXITCODE -ne 0) { throw 'Release build failed.' }
-      - name: Upload all assets to a draft, then publish
+      - name: Publish only the current tested push
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
           $release = Get-Content -LiteralPath 'dist/release/release-assets.json' -Raw | ConvertFrom-Json
-          if ($release.tag -ne $env:RELEASE_TAG) { throw 'Release manifest tag mismatch.' }
-          gh release view "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" *> $null
-          if ($LASTEXITCODE -eq 0) { throw 'This release already exists; existing releases will not be overwritten.' }
+          python ci_release.py check --repository "$env:GITHUB_REPOSITORY" --sha "$env:GITHUB_SHA" --version "$($release.version)" --output dist/publication-check.json
+          if ($LASTEXITCODE -ne 0) { throw 'Release guard failed.' }
+          $guard = Get-Content -LiteralPath 'dist/publication-check.json' -Raw | ConvertFrom-Json
+          if (-not $guard.allowed) { Write-Output $guard.reason; exit 0 }
           $assets = @($release.assets | ForEach-Object { Join-Path 'dist/release' $_ })
-          foreach ($asset in $assets) {
-            if (-not (Test-Path -LiteralPath $asset -PathType Leaf)) { throw "Missing release asset: $asset" }
+          if (-not $guard.existing_draft) {
+            gh release create "$($release.tag)" --repo "$env:GITHUB_REPOSITORY" --target "$env:GITHUB_SHA" --draft --title "Local Agent $($release.version)" --notes-file 'dist/release/release-notes.txt'
+            if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release.' }
           }
-          gh release create "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --verify-tag --draft --title "Local Agent $($release.version)" --notes-file 'dist/release/release-notes.txt'
-          if ($LASTEXITCODE -ne 0) { throw 'Could not create draft release.' }
-          gh release upload "$env:RELEASE_TAG" @assets --repo "$env:GITHUB_REPOSITORY"
+          gh release upload "$($release.tag)" @assets --repo "$env:GITHUB_REPOSITORY" --clobber
           if ($LASTEXITCODE -ne 0) { throw 'Asset upload failed; release remains a draft.' }
-          gh release edit "$env:RELEASE_TAG" --repo "$env:GITHUB_REPOSITORY" --draft=false --latest
+          python ci_release.py check --repository "$env:GITHUB_REPOSITORY" --sha "$env:GITHUB_SHA" --version "$($release.version)" --require-assets dist/release/release-assets.json --output dist/final-publication-check.json
+          if ($LASTEXITCODE -ne 0) { throw 'Final release guard failed; release remains a draft.' }
+          $finalGuard = Get-Content -LiteralPath 'dist/final-publication-check.json' -Raw | ConvertFrom-Json
+          if (-not $finalGuard.allowed) { Write-Output $finalGuard.reason; exit 0 }
+          gh release edit "$($release.tag)" --repo "$env:GITHUB_REPOSITORY" --draft=false --latest
           if ($LASTEXITCODE -ne 0) { throw 'Could not publish the prepared draft.' }

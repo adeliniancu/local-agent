@@ -29,8 +29,8 @@ CHAT CONTROLS
 - You can send another message while the agent works. It is marked queued
   and is read before the agent's next step. It does not interrupt a response
   already being generated.
-- If the agent asks a question, pick an option or type your own answer.
-  You can also answer in the main chat box. Skip pauses for your next message.
+- Questions appear inside the chat. Pick an option and click Send answer,
+  or type your own answer in the message box. Skip pauses for your next message.
 - Reason more gives the same model extra time to think about a task.
 - Elapsed shows time spent on the current task, including waits for you.
   Last generation tokens/s uses the model's reported generation speed;
@@ -40,8 +40,11 @@ CHAT CONTROLS
 WHEN IT WORKS ON FILES
 
 The agent's file tools stay inside the folder you select. Before running
-a terminal command, it shows the exact command for your approval. You can
-allow a single command or allow commands for the rest of that chat.
+a terminal command, it shows the exact command in a chat card with Allow
+once and Reject buttons. The visible "Always allow commands in this chat"
+checkbox beside the message box lets commands run without repeated prompts.
+It also approves a command currently waiting for you. The checkbox resets
+when you start a new chat or reopen a saved chat.
 Commands run with your Windows account and can access other folders.
 
 Click Stop to cancel the current task and discard follow-ups still queued.

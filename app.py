@@ -13,6 +13,7 @@ import threading
 import time
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
+from tkinter import font as tkfont
 
 ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
@@ -59,10 +60,11 @@ class LocalAgentApp:
         self.run_id = 0
         self.stream_started = False
         self.stream_text = ""
-        self.approval_window: tk.Toplevel | None = None
+        self.approval_window: tk.Frame | None = None
         self.approval_request = None
-        self.question_window: tk.Toplevel | None = None
+        self.question_window: tk.Frame | None = None
         self.question_request = None
+        self.inline_cards: list[tk.Frame] = []
         self.stream_mark: str | None = None
         self.stream_start_mark: str | None = None
         self.stream_end_mark: str | None = None
@@ -221,6 +223,7 @@ class LocalAgentApp:
         self.transcript.configure(yscrollcommand=scrollbar.set)
         scrollbar.pack(side="right", fill="y")
         self.transcript.pack(side="left", fill="both", expand=True)
+        self.transcript.bind("<Configure>", self._resize_inline_cards)
         for name, opts in {
             "welcome_title": {"font": ("Segoe UI", 24, "bold"), "foreground": COLORS["text"], "spacing1": 35, "spacing3": 14},
             "muted": {"foreground": COLORS["muted"]},
@@ -251,6 +254,13 @@ class LocalAgentApp:
         self.input.bind("<Return>", self._send_key)
         self.input.bind("<Shift-Return>", self._newline_key)
         self.input.bind("<Control-Return>", self._send_key)
+        self.always_allow_var = tk.BooleanVar(value=False)
+        self.always_allow_box = tk.Checkbutton(composer, text="Always allow commands in this chat",
+                         variable=self.always_allow_var, command=self._toggle_command_permission,
+                         bg=COLORS["panel"], fg=COLORS["muted"], activebackground=COLORS["panel"],
+                         activeforeground=COLORS["text"], selectcolor=COLORS["side"],
+                         font=("Segoe UI", 9), bd=0)
+        self.always_allow_box.pack(anchor="w", padx=10, pady=(0, 6))
         composer_actions = tk.Frame(composer, bg=COLORS["panel"])
         composer_actions.pack(fill="x", padx=12, pady=(0, 10))
         self._label(composer_actions, "Enter to send · Shift+Enter for a new line", size=8, color=COLORS["muted"]).pack(side="left")
@@ -267,6 +277,55 @@ class LocalAgentApp:
         self.transcript.insert("end", text, tag)
         self.transcript.configure(state="disabled")
         self.transcript.see("end")
+
+    def _inline_card(self, title):
+        card = tk.Frame(self.transcript, bg=COLORS["panel"], highlightbackground=COLORS["border"],
+                        highlightthickness=1, padx=12, pady=10)
+        self._label(card, title, size=11, bold=True, color=COLORS["mint"]).pack(anchor="w", pady=(0, 8))
+        self.transcript.configure(state="normal")
+        self.transcript.window_create("end", window=card, padx=2, pady=6)
+        self.transcript.insert("end", "\n\n")
+        self.transcript.configure(state="disabled")
+        self.inline_cards.append(card)
+        self.transcript.see("end")
+        return card
+
+    def _resize_inline_cards(self, _event=None):
+        width = max(270, self.transcript.winfo_width() - 48)
+
+        def resize(widget):
+            for child in widget.winfo_children():
+                if isinstance(child, (tk.Label, tk.Radiobutton)):
+                    child.configure(wraplength=max(240, width - 28))
+                elif isinstance(child, tk.Text):
+                    char_width = max(1, tkfont.Font(font=child.cget("font")).measure("0"))
+                    child.configure(width=max(24, int((width - 30) / char_width)))
+                elif isinstance(child, tk.Canvas):
+                    child.configure(width=max(240, width - 30))
+                resize(child)
+        self.inline_cards = [card for card in self.inline_cards if card.winfo_exists()]
+        for card in self.inline_cards:
+            resize(card)
+
+    def _resolve_inline_card(self, card, text):
+        if card is None or not card.winfo_exists():
+            return
+        for child in card.winfo_children():
+            child.destroy()
+        self._label(card, text, size=9, color=COLORS["muted"], justify="left", wraplength=450).pack(anchor="w")
+        self._resize_inline_cards()
+
+    def _toggle_command_permission(self):
+        if self.always_allow_var.get():
+            self.allow_commands.set()
+            if self.approval_request is not None and not self.cancel.is_set():
+                self._answer_approval(True, allow_chat=True)
+        else:
+            self.allow_commands.clear()
+
+    def _reset_command_permission(self):
+        self.allow_commands.clear()
+        self.always_allow_var.set(False)
 
     @staticmethod
     def _short_path(path):
@@ -363,6 +422,10 @@ class LocalAgentApp:
         threading.Thread(target=worker, daemon=True).start()
 
     def _render_history(self):
+        for card in self.inline_cards:
+            if card.winfo_exists():
+                card.destroy()
+        self.inline_cards = []
         self.transcript.configure(state="normal")
         self.transcript.delete("1.0", "end")
         self.transcript.configure(state="disabled")
@@ -436,7 +499,7 @@ class LocalAgentApp:
         if not self._archive_history():
             return
         self.history = []
-        self.allow_commands.clear()
+        self._reset_command_permission()
         self.elapsed_seconds = 0.0
         self.last_tokens_per_second = None
         self.memory_state = {}
@@ -489,7 +552,7 @@ class LocalAgentApp:
         self.history = history
         self.memory_state = self._history_memory_state(history) or self._clean_memory_state(saved.get("memory_state"))
         self._refresh_memory_indicator()
-        self.allow_commands.clear()
+        self._reset_command_permission()
         self.model_var.set(str(saved.get("model") or DEFAULT_MODEL))
         self.folder_title.configure(text=self._short_name(workspace))
         self.folder_path.configure(text=self._short_path(workspace))
@@ -702,37 +765,32 @@ class LocalAgentApp:
             request["event"].set()
             return
         self.approval_request = request
-        dialog = tk.Toplevel(self.root)
-        self.approval_window = dialog
-        dialog.title("Run this command?")
-        dialog.configure(bg=COLORS["bg"])
-        dialog.transient(self.root)
-        dialog.geometry("690x420")
-        dialog.minsize(550, 360)
-        dialog.protocol("WM_DELETE_WINDOW", lambda: self._answer_approval(False))
-        content = tk.Frame(dialog, bg=COLORS["bg"])
-        content.pack(fill="both", expand=True, padx=24, pady=22)
-        self._label(content, "Run this command?", size=18, bold=True).pack(anchor="w")
-        self._label(content, str(request["cwd"]), size=9, color=COLORS["muted"], wraplength=620, justify="left").pack(anchor="w", pady=(5, 15))
-        command_box = tk.Text(content, height=6, wrap="word", relief="flat", bg=COLORS["panel"], fg=COLORS["text"],
-                              font=("Consolas", 10), padx=12, pady=12)
+        if self.allow_commands.is_set():
+            self._answer_approval(True)
+            return
+        content = self._inline_card("Run this command?")
+        self.approval_window = content
+        self._label(content, str(request["cwd"]), size=9, color=COLORS["muted"],
+                    wraplength=450, justify="left").pack(anchor="w", pady=(0, 8))
+        command_frame = tk.Frame(content, bg=COLORS["panel"])
+        command_frame.pack(fill="x")
+        command_box = tk.Text(command_frame, height=3, width=48, wrap="word", relief="flat", bg=COLORS["side"], fg=COLORS["text"],
+                              font=("Consolas", 10), padx=8, pady=8)
+        scrollbar = ttk.Scrollbar(command_frame, orient="vertical", command=command_box.yview)
+        command_box.configure(yscrollcommand=scrollbar.set)
         command_box.insert("1.0", request["command"])
         command_box.configure(state="disabled")
-        command_box.pack(fill="both", expand=True)
+        scrollbar.pack(side="right", fill="y")
+        command_box.pack(side="left", fill="both", expand=True)
         self._label(content, "Commands run with your Windows account and can access files outside the selected folder.",
-                    size=9, color=COLORS["muted"], wraplength=620, justify="left").pack(anchor="w", pady=(12, 9))
-        allow_chat = tk.BooleanVar(value=False)
-        tk.Checkbutton(content, text="Allow commands for the rest of this chat", variable=allow_chat,
-                       bg=COLORS["bg"], fg=COLORS["text"], selectcolor=COLORS["panel"],
-                       activebackground=COLORS["bg"], activeforeground=COLORS["text"],
-                       font=("Segoe UI", 10)).pack(anchor="w")
-        buttons = tk.Frame(content, bg=COLORS["bg"])
-        buttons.pack(fill="x", pady=(12, 0))
-        self._button(buttons, "Allow", lambda: self._answer_approval(True, allow_chat.get()), primary=True).pack(side="right")
+                    size=8, color=COLORS["muted"], wraplength=450, justify="left").pack(anchor="w", pady=(8, 0))
+        buttons = tk.Frame(content, bg=COLORS["panel"])
+        buttons.pack(fill="x", pady=(9, 0))
+        self._button(buttons, "Allow once", lambda: self._answer_approval(True), primary=True).pack(side="right")
         self._button(buttons, "Reject", lambda: self._answer_approval(False)).pack(side="right", padx=8)
-        self.status_label.configure(text="Waiting for you to review a command.")
-        dialog.lift()
-        dialog.focus_set()
+        self._resize_inline_cards()
+        self.transcript.see("end")
+        self.status_label.configure(text="Review the command in chat, or enable always allow below.")
 
     def _answer_approval(self, allowed, allow_chat=False):
         request = self.approval_request
@@ -740,10 +798,12 @@ class LocalAgentApp:
             request["allowed"] = allowed
             if allowed and allow_chat:
                 self.allow_commands.set()
+                self.always_allow_var.set(True)
             request["event"].set()
             self.approval_request = None
         if self.approval_window:
-            self.approval_window.destroy()
+            outcome = "Command allowed for this chat." if allowed and self.allow_commands.is_set() else "Command allowed once." if allowed else "Command cancelled." if self.cancel.is_set() else "Command rejected."
+            self._resolve_inline_card(self.approval_window, outcome)
             self.approval_window = None
 
     def _show_question(self, request):
@@ -753,63 +813,47 @@ class LocalAgentApp:
         self.question_request = request
         self._append("QUESTION FOR YOU\n", "agent_role")
         self._append(request["question"] + "\n\n")
-        dialog = tk.Toplevel(self.root)
-        self.question_window = dialog
-        dialog.title("Your agent has a question")
-        dialog.configure(bg=COLORS["bg"])
-        dialog.transient(self.root)
-        dialog.geometry("660x520")
-        dialog.minsize(560, 440)
-        dialog.protocol("WM_DELETE_WINDOW", lambda: self._answer_question(None))
-        content = tk.Frame(dialog, bg=COLORS["bg"])
-        content.pack(fill="both", expand=True, padx=24, pady=22)
-        self._label(content, "A question for you", size=18, bold=True).pack(anchor="w")
-        footer = tk.Frame(content, bg=COLORS["bg"])
-        footer.pack(side="bottom", fill="x", pady=(10, 0))
-        scroll_frame = tk.Frame(content, bg=COLORS["bg"])
-        scroll_frame.pack(fill="both", expand=True, pady=(12, 0))
-        canvas = tk.Canvas(scroll_frame, bg=COLORS["bg"], bd=0, highlightthickness=0)
-        scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=canvas.yview)
-        canvas.configure(yscrollcommand=scrollbar.set)
-        scrollbar.pack(side="right", fill="y")
-        canvas.pack(side="left", fill="both", expand=True)
-        choices = tk.Frame(canvas, bg=COLORS["bg"])
-        canvas_item = canvas.create_window((0, 0), window=choices, anchor="nw")
-        choices.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all")))
-
-        def resize_choices(event):
-            canvas.itemconfigure(canvas_item, width=event.width)
-            for child in choices.winfo_children():
-                child.configure(wraplength=max(280, event.width - 24))
-        canvas.bind("<Configure>", resize_choices)
-        self._label(choices, request["question"], size=11, wraplength=510, justify="left").pack(anchor="w", fill="x", pady=(0, 12))
+        content = self._inline_card("Choose an answer" if request.get("options") else "Your answer")
+        self.question_window = content
         selected = tk.StringVar(value="")
-        for option in request.get("options", [])[:6]:
-            tk.Radiobutton(choices, text=str(option), variable=selected, value=str(option),
-                           bg=COLORS["bg"], fg=COLORS["text"], activebackground=COLORS["bg"],
-                           activeforeground=COLORS["text"], selectcolor=COLORS["panel"],
-                           font=("Segoe UI", 10), wraplength=490, justify="left", anchor="w").pack(fill="x", pady=3)
-        self._label(footer, "Or write your own answer", size=9, color=COLORS["muted"]).pack(anchor="w", pady=(0, 6))
-        answer = tk.Text(footer, height=3, wrap="word", relief="flat", bd=0, bg=COLORS["panel"], fg=COLORS["text"],
-                         insertbackground=COLORS["mint"], font=("Segoe UI", 11), padx=10, pady=8)
-        answer.pack(fill="x")
+        if request.get("options"):
+            scroll_frame = tk.Frame(content, bg=COLORS["panel"])
+            scroll_frame.pack(fill="x")
+            canvas = tk.Canvas(scroll_frame, bg=COLORS["panel"], width=440, height=90, bd=0, highlightthickness=0)
+            scrollbar = ttk.Scrollbar(scroll_frame, orient="vertical", command=canvas.yview)
+            canvas.configure(yscrollcommand=scrollbar.set)
+            scrollbar.pack(side="right", fill="y")
+            canvas.pack(side="left", fill="x", expand=True)
+            choices = tk.Frame(canvas, bg=COLORS["panel"])
+            canvas_item = canvas.create_window((0, 0), window=choices, anchor="nw")
+
+            def fit_choices(_event=None):
+                canvas.configure(scrollregion=canvas.bbox("all"), height=min(140, max(28, choices.winfo_reqheight())))
+            choices.bind("<Configure>", fit_choices)
+            canvas.bind("<Configure>", lambda event: canvas.itemconfigure(canvas_item, width=event.width))
+            for option in request.get("options", [])[:6]:
+                tk.Radiobutton(choices, text=str(option), variable=selected, value=str(option),
+                               bg=COLORS["panel"], fg=COLORS["text"], activebackground=COLORS["panel"],
+                               activeforeground=COLORS["text"], selectcolor=COLORS["side"],
+                               font=("Segoe UI", 10), wraplength=420, justify="left", anchor="w").pack(fill="x", pady=3)
+        self._label(content, "Or type your own answer in the message box below.", size=9,
+                    color=COLORS["muted"], wraplength=450, justify="left").pack(anchor="w", pady=(8, 0))
 
         def submit(_event=None):
-            text = answer.get("1.0", "end-1c").strip() or selected.get().strip()
+            text = self.input.get("1.0", "end-1c").strip() or selected.get().strip()
             if text:
+                self.input.delete("1.0", "end")
                 self._answer_question(text)
             return "break"
-        answer.bind("<Return>", submit)
-        answer.bind("<Shift-Return>", lambda _event: (answer.insert("insert", "\n"), "break")[1])
-        buttons = tk.Frame(footer, bg=COLORS["bg"])
-        buttons.pack(fill="x", pady=(16, 0))
+        buttons = tk.Frame(content, bg=COLORS["panel"])
+        buttons.pack(fill="x", pady=(9, 0))
         self._button(buttons, "Send answer", submit, primary=True).pack(side="right")
         self._button(buttons, "Skip", lambda: self._answer_question(None)).pack(side="right", padx=8)
-        self._label(footer, "You can also answer in the main chat box.", size=8, color=COLORS["muted"]).pack(anchor="w", pady=(10, 0))
         self.send_button.configure(text="Send answer")
         self.status_label.configure(text="Your agent is waiting for your answer.")
-        answer.focus_set()
-        dialog.lift()
+        self._resize_inline_cards()
+        self.transcript.see("end")
+        self.input.focus_set()
 
     def _answer_question(self, answer):
         request = self.question_request
@@ -826,7 +870,7 @@ class LocalAgentApp:
                 self._append("Question skipped.\n\n", "muted")
             self.send_button.configure(text="Send follow-up" if self.busy else "Send  ↑")
         if self.question_window is not None:
-            self.question_window.destroy()
+            self._resolve_inline_card(self.question_window, "Answer received." if answer is not None and str(answer).strip() else "Question skipped.")
             self.question_window = None
 
     def _finish_stream(self):
@@ -962,6 +1006,8 @@ class LocalAgentApp:
         elif event == "tool":
             self._finish_stream()
             name = payload.get("name", "tool")
+            if name in {"ask_user", "set_plan"}:
+                return
             arguments = payload.get("arguments", {})
             labels = {"list_files": "LOOKING THROUGH FILES", "read_file": "READING FILE", "write_file": "WRITING FILE",
                       "replace_text": "EDITING FILE", "search_files": "SEARCHING FILES", "run_command": "RUNNING COMMAND",
@@ -973,6 +1019,8 @@ class LocalAgentApp:
                 preview = str(arguments)
             self._append(str(preview)[:1200] + "\n", "tool")
         elif event == "tool_result":
+            if payload.get("name") in {"ask_user", "set_plan"}:
+                return
             result = payload.get("result", "")
             if not isinstance(result, str):
                 result = json.dumps(result, ensure_ascii=False)
@@ -1030,6 +1078,7 @@ class LocalAgentApp:
                        self.folder_button, self.retry_button, self.update_button, self.download_button):
             widget.configure(state="disabled")
         self.input.configure(state="disabled")
+        self.always_allow_box.configure(state="disabled")
         self.model_box.configure(state="disabled")
         self._close_started = time.monotonic()
         self._wait_for_close()
