@@ -20,9 +20,9 @@ Productive tasks continue automatically beyond 24 model steps. Repeated work wit
 
 ## Models and performance
 
-The inline model and performance controls offer Auto, RTX 5060 desktop, RTX 4070 laptop, RTX 5080 desktop, and CPU profiles. GPU allocation uses detected hardware, available memory, and the selected model. The default active context remains 16,384 tokens. Profiles do not change GPU firmware or power settings, and token speed always shows measured performance.
+The inline model and performance controls offer Auto, RTX 5060 desktop, RTX 4070 laptop, RTX 5080 desktop, and CPU profiles. GPU allocation uses detected hardware, available memory, and the selected model. The default active context remains 16,384 tokens when the model supports it; smaller supported model windows receive matching working-memory budgets. Profiles do not change GPU firmware or power settings, and token speed always shows measured performance.
 
-Download another local Ollama model by name, or import a local GGUF file with a chosen model name. Downloads and imports start only when requested. Models need tool support for file and command tasks; the app checks advertised capabilities before starting that work. Larger models need more memory and can run more slowly, even on a faster GPU.
+Download another local Ollama model by name, or import a local GGUF file with a chosen model name. Downloads and imports start only when requested. Models need tool support and at least an 8,192-token context for file and command tasks; the app checks advertised capabilities before starting that work. Larger models need more memory and can run more slowly, even on a faster GPU.
 
 ## Python projects
 
