@@ -127,15 +127,24 @@ def _model_info(model: str) -> dict:
     return {"name": model, "size_bytes": size, "block_count": blocks,
             "context_length": int(field("context_length", 16384)),
             "kv_bytes_per_token": attention_blocks * kv_heads * (key_length + value_length) * 2,
-            "capabilities": list(response.get("capabilities") or []), "details": response.get("details") or {}}
+            "capabilities": list(response.get("capabilities") or []),
+            "capabilities_known": isinstance(response.get("capabilities"), list),
+            "details": response.get("details") or {}}
 
 
 def get_model_info(model: str) -> dict:
     return json.loads(json.dumps(_model_info(_validate_model_name(model))))
 
 
+def _context_length(metadata: dict) -> int:
+    maximum = int(metadata.get("context_length") or 16384)
+    if maximum < 8192:
+        raise ValueError("This model supports fewer than 8,192 context tokens. Choose a model with at least 8K context for this agent.")
+    return min(16384, maximum)
+
+
 def _calculate_options(model: str, profile: str, hardware: dict, metadata: dict, loaded_vram: int = 0) -> dict:
-    context = min(16384, max(2048, int(metadata.get("context_length") or 16384)))
+    context = _context_length(metadata)
     options = {"num_ctx": context, "num_gpu": 0}
     if profile == "cpu" or not hardware.get("gpus"):
         return options
@@ -168,15 +177,16 @@ def get_inference_options(model: str, profile: str = "auto") -> dict:
     model = _validate_model_name(model)
     if profile not in PERFORMANCE_PROFILES:
         raise ValueError("Choose a recognized performance profile.")
+    metadata = get_model_info(model)
+    context = _context_length(metadata)
     if profile == "cpu":
-        return {"num_ctx": 16384, "num_gpu": 0}
+        return {"num_ctx": context, "num_gpu": 0}
     override = os.environ.get("LOCAL_AGENT_GPU_LAYERS")
     if override is not None:
         try:
-            return {"num_ctx": 16384, "num_gpu": max(0, min(999, int(override)))}
+            return {"num_ctx": context, "num_gpu": max(0, min(999, int(override)))}
         except ValueError:
             pass
-    metadata = get_model_info(model)
     hardware = get_hardware_info()
     loaded = _get("/api/ps", timeout=5).get("models", [])
     # With several GPUs, do not attribute an unknown allocation to the first card.

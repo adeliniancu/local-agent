@@ -55,13 +55,24 @@ class AllocationTests(unittest.TestCase):
         self.assertGreater(result["num_gpu"], 0)
         self.assertLess(result["num_gpu"], 20)
 
-    def test_cpu_and_launcher_override_do_not_probe_network(self):
-        with patch.dict(os.environ, {"LOCAL_AGENT_GPU_LAYERS": "26"}), patch.object(runtime, "_get") as get:
+    def test_cpu_and_launcher_override_skip_gpu_probe_but_validate_model(self):
+        with patch.dict(os.environ, {"LOCAL_AGENT_GPU_LAYERS": "26"}), \
+                patch.object(runtime, "get_model_info", return_value=QWEN_INFO) as metadata, \
+                patch.object(runtime, "get_hardware_info") as get:
             self.assertEqual(0, runtime.get_inference_options(runtime.MODEL, "cpu")["num_gpu"])
             self.assertEqual(26, runtime.get_inference_options(runtime.MODEL, "auto")["num_gpu"])
             get.assert_not_called()
-        with patch.dict(os.environ, {"LOCAL_AGENT_GPU_LAYERS": "0"}):
+            self.assertEqual(2, metadata.call_count)
+        with patch.dict(os.environ, {"LOCAL_AGENT_GPU_LAYERS": "0"}), \
+                patch.object(runtime, "get_model_info", return_value=QWEN_INFO):
             self.assertEqual(0, runtime.get_inference_options(runtime.MODEL, "rtx5080")["num_gpu"])
+
+    def test_too_small_context_rejected_for_every_profile(self):
+        info = {**QWEN_INFO, "context_length": 4096}
+        with patch.object(runtime, "get_model_info", return_value=info):
+            for profile in runtime.PERFORMANCE_PROFILES:
+                with self.subTest(profile=profile), self.assertRaisesRegex(ValueError, "at least 8K"):
+                    runtime.get_inference_options("small-model", profile)
 
     def test_invalid_profile_is_rejected(self):
         with self.assertRaises(ValueError):
@@ -109,6 +120,7 @@ class ModelMetadataTests(unittest.TestCase):
         self.assertEqual(32768, result["kv_bytes_per_token"])
         self.assertEqual(QWEN_INFO["size_bytes"], result["size_bytes"])
         self.assertIn("tools", result["capabilities"])
+        self.assertTrue(result["capabilities_known"])
 
     def test_remote_model_metadata_is_rejected_even_without_cloud_suffix(self):
         with patch.object(runtime, "_post", return_value={"remote_host": "https://example.invalid"}):
