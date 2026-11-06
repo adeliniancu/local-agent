@@ -654,6 +654,10 @@ class Agent:
             f"Python interpreter: {python_executable}. "
             "When running Python scripts, use python: the project's .venv is preferred when present, otherwise the bundled interpreter is used."
         )
+        if self._uses_json_tool_fallback():
+            text += (" Use native tool calls for actions. If this model cannot emit a native call, request one tool with "
+                     '<tool_call>{"name":"TOOL_NAME","arguments":{...}}</tool_call> and wait for its result. '
+                     "Use prose or code fences for examples and requested JSON output; the bare tool form means execute an action.")
         instructions = self.workspace / "AGENTS.md"
         try:
             if instructions.exists():
@@ -1203,6 +1207,61 @@ class Agent:
         self.emit("assistant", {"text": text})
         self.emit("status", {"text": "Paused. Your work is saved."})
 
+    def _uses_json_tool_fallback(self):
+        family = self.model.casefold().rsplit("/", 1)[-1].split(":", 1)[0]
+        return family == "qwen2.5-coder"
+
+    @classmethod
+    def _matches_schema(cls, value, schema):
+        kind = schema.get("type")
+        types = {"string": str, "object": dict, "array": list, "integer": int, "boolean": bool}
+        if kind in types and (not isinstance(value, types[kind]) or (kind == "integer" and isinstance(value, bool))):
+            return False
+        if "enum" in schema and value not in schema["enum"]:
+            return False
+        if kind == "object":
+            properties = schema.get("properties", {})
+            if any(key not in value for key in schema.get("required", [])):
+                return False
+            if schema.get("additionalProperties") is False and any(key not in properties for key in value):
+                return False
+            return all(cls._matches_schema(item, properties[key]) for key, item in value.items() if key in properties)
+        if kind == "array":
+            if not schema.get("minItems", 0) <= len(value) <= schema.get("maxItems", len(value)):
+                return False
+            return all(cls._matches_schema(item, schema.get("items", {})) for item in value)
+        return True
+
+    def _normalize_tool_message(self, message):
+        """Compatibility for the observed Qwen2.5-Coder bare-JSON tool format only."""
+        if not self._uses_json_tool_fallback() or message.get("tool_calls") or not isinstance(message.get("content"), str):
+            return message
+        content = message["content"].strip()
+        if content.startswith("<tool_call>") and content.endswith("</tool_call>"):
+            content = content[len("<tool_call>"):-len("</tool_call>")].strip()
+        if not (content.startswith("{") and content.endswith("}")):
+            return message
+        def unique_object(pairs):
+            result = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError("Duplicate JSON key")
+                result[key] = value
+            return result
+        try:
+            request = json.loads(content, object_pairs_hook=unique_object)
+        except (TypeError, ValueError):
+            return message
+        if not isinstance(request, dict) or set(request) != {"name", "arguments"} or not isinstance(request["name"], str):
+            return message
+        schema = next((item["function"]["parameters"] for item in self._available_tools()
+                       if item["function"]["name"] == request["name"]), None)
+        if schema is None or not self._matches_schema(request["arguments"], schema):
+            return message
+        if getattr(self, "_request_streamed", False):
+            self.emit("stream_reset", {"text": "Using the model's structured tool request."})
+        return {**message, "content": "", "tool_calls": [{"type": "function", "function": request}]}
+
     def run(self, prompt: str, attachments: list[dict] | None = None) -> None:
         self._denied = False
         self._unanswered = False
@@ -1233,6 +1292,7 @@ class Agent:
                 self.emit("status", {"text": "Thinking locally…" if step == 0 else "Checking the results…"})
                 message = self._chat()
                 self._mark_images_processed()
+                message = self._normalize_tool_message(message)
                 self.history.append(message)
                 if message.get("content"):
                     self.emit("assistant", {"text": message["content"]})
