@@ -637,6 +637,8 @@ class LocalAgentApp:
                 self.history = history
             self.model_name = str(saved.get("model") or DEFAULT_MODEL)
             self.reason_more = bool(saved.get("reason_more", False))
+            profile = saved.get("performance_profile", "auto")
+            self.performance_profile = profile if profile in PROFILE_LABELS else "auto"
             if self.history:
                 self.memory_state = self._history_memory_state(self.history) or self._clean_memory_state(saved.get("memory_state"))
         except (OSError, ValueError, TypeError):
@@ -648,6 +650,7 @@ class LocalAgentApp:
             target = STATE.with_suffix(".tmp")
             target.write_text(json.dumps({"workspace": str(self.workspace), "model": self.model_var.get().strip() or DEFAULT_MODEL,
                                           "reason_more": self.think_var.get(), "memory_state": self.memory_state,
+                                          "performance_profile": self._selected_profile(),
                                           "history": self.history}, ensure_ascii=False, indent=2), encoding="utf-8")
             target.replace(STATE)
         except OSError as exc:
@@ -657,6 +660,12 @@ class LocalAgentApp:
         if not self.busy:
             self.model_name = self.model_var.get().strip() or DEFAULT_MODEL
             self._save_state()
+            if self.model_name != self.model_info_name:
+                self.model_tool_support = None
+                self.model_thinking_support = None
+                self.model_capability_label.configure(text="Tool support: not checked yet.", fg=COLORS["muted"])
+                self.refresh_model_info()
+                self._update_model_controls()
 
     def new_chat(self):
         if self.busy:
@@ -719,6 +728,9 @@ class LocalAgentApp:
         self._refresh_memory_indicator()
         self._reset_command_permission()
         self.model_var.set(str(saved.get("model") or DEFAULT_MODEL))
+        self.model_info_name = ""
+        self.model_tool_support = None
+        self.model_thinking_support = None
         self.folder_title.configure(text=self._short_name(workspace))
         self.folder_path.configure(text=self._short_path(workspace))
         self._render_history()
@@ -726,6 +738,7 @@ class LocalAgentApp:
         self.send_button.configure(state="normal" if self._can_send() else "disabled")
         self.status_label.configure(text="Saved chat opened. You can continue the conversation." if workspace.is_dir()
                                     else "Chat restored. Its folder is unavailable; choose a folder before sending a task.")
+        self.refresh_model_info()
 
     def choose_folder(self):
         if self.busy:
@@ -757,6 +770,7 @@ class LocalAgentApp:
         self.send_button.configure(state="disabled")
         self.retry_button.configure(state="disabled")
         self.update_button.configure(state="disabled")
+        self._update_model_controls()
         self.engine_label.configure(text="●  Starting local engine", fg=COLORS["muted"])
         self.status_label.configure(text="Connecting to your local model…")
 
@@ -779,6 +793,7 @@ class LocalAgentApp:
         self.send_button.configure(state="normal" if self._can_send() else "disabled", text="Send follow-up" if busy else "Send  ↑")
         self.stop_button.configure(state="normal" if busy else "disabled")
         self.input.configure(state="normal")
+        self._update_model_controls()
 
     def _send_key(self, _event):
         self.send()
@@ -798,6 +813,15 @@ class LocalAgentApp:
 
     def send(self):
         if not self.ready or self.updating or self.closing:
+            return
+        if self.downloading:
+            self.status_label.configure(text="Wait for the model download or import to finish.")
+            return
+        if self.model_checking:
+            self.status_label.configure(text="Checking the selected model's tool support…")
+            return
+        if self.model_info_name == self.model_var.get().strip() and self.model_tool_support is False:
+            self.status_label.configure(text="This model does not support tools. Choose a tool-capable model for agent work.")
             return
         if not self.workspace.is_dir():
             self.status_label.configure(text="Your previous folder is unavailable. Choose a folder before sending a task.")
@@ -847,7 +871,8 @@ class LocalAgentApp:
             self.elapsed_seconds = 0.0
             self.last_tokens_per_second = None
         model = self.model_var.get().strip()
-        think = bool(self.think_var.get())
+        think = bool(self.think_var.get()) and self.model_thinking_support is not False
+        performance_profile = self._selected_profile()
         workspace = str(self.workspace)
         base_url = self.base_url
         cancel = self.cancel
@@ -896,7 +921,8 @@ class LocalAgentApp:
             try:
                 from agent_core import Agent
                 agent = Agent(workspace, emit, approve, cancel, model=model, base_url=base_url,
-                              ask_user=ask_user, poll_messages=poll_messages, think=think)
+                              ask_user=ask_user, poll_messages=poll_messages, think=think,
+                              performance_profile=performance_profile)
                 self.agent = agent
                 agent.history = history
                 agent.run(prompt)
