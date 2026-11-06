@@ -273,6 +273,127 @@ class DesktopTests(unittest.TestCase):
         self.assertTrue(self.ui.ready)
         self.assertEqual(self.ui.setup_bar.winfo_manager(), "")
 
+    def model_info(self, info, *, model=None, serial=None):
+        self.ui._handle_event("model_info", {
+            "model": model or self.ui.model_var.get(),
+            "serial": self.ui.model_check_serial if serial is None else serial,
+            "info": info,
+        }, None)
+
+    def test_profile_is_saved_and_model_controls_wait_for_task_completion(self):
+        self.ui.profile_var.set(app.PROFILE_LABELS["rtx4070_laptop"])
+        self.ui._profile_changed()
+        self.assertEqual(json.loads(app.STATE.read_text())["performance_profile"], "rtx4070_laptop")
+        self.ui.performance_profile = "auto"
+        self.ui._load_state()
+        self.assertEqual(self.ui.performance_profile, "rtx4070_laptop")
+        self.ui.import_path = "example.gguf"
+        self.ui._set_busy(True)
+        for widget in (self.ui.profile_box, self.ui.download_name_entry, self.ui.custom_download_button,
+                       self.ui.import_name_entry, self.ui.choose_gguf_button, self.ui.import_button):
+            self.assertEqual(str(widget.cget("state")), "disabled")
+        self.assertEqual(self.ui.input.cget("state"), "normal")
+        self.ui._set_busy(False)
+        self.assertEqual(str(self.ui.profile_box.cget("state")), "readonly")
+        self.assertEqual(self.ui.import_button.cget("state"), "normal")
+
+    def test_model_capabilities_block_tools_and_disable_unsupported_thinking(self):
+        self.ui.think_var.set(True)
+        self.model_info({"capabilities": ["completion"], "capabilities_known": True, "context_length": 16384})
+        self.assertFalse(self.ui.think_var.get())
+        self.assertEqual(self.ui.think_box.cget("state"), "disabled")
+        self.assertEqual(self.ui.send_button.cget("state"), "disabled")
+        self.ui.input.insert("1.0", "Edit a file")
+        with patch.object(self.ui, "_start_run") as start:
+            self.ui.send()
+            start.assert_not_called()
+        self.assertIn("does not support tools", self.ui.status_label.cget("text"))
+        self.model_info({"capabilities": ["completion", "tools"], "context_length": 8192})
+        self.assertEqual(self.ui.send_button.cget("state"), "normal")
+        self.assertIn("Reason more is unavailable", self.ui.model_capability_label.cget("text"))
+
+    def test_small_context_blocked_and_unknown_capabilities_explained(self):
+        self.model_info({"capabilities": ["tools", "thinking"], "context_length": 4096})
+        self.assertFalse(self.ui._can_send())
+        self.assertIn("8,192", self.ui.model_capability_label.cget("text"))
+        self.model_info({"capabilities": [], "capabilities_known": False})
+        self.assertTrue(self.ui._can_send())
+        self.assertIn("Tool support is unknown", self.ui.model_capability_label.cget("text"))
+        self.model_info({"capabilities": [], "capabilities_known": True})
+        self.assertFalse(self.ui._can_send())
+
+    def test_late_model_info_cannot_overwrite_new_selection(self):
+        self.ui.model_check_serial = 4
+        self.ui.model_checking = True
+        self.model_info({"capabilities": ["completion"]}, serial=3)
+        self.assertTrue(self.ui.model_checking)
+        self.assertIsNone(self.ui.model_tool_support)
+        self.model_info({"capabilities": ["completion"]}, model="old-model:latest")
+        self.assertTrue(self.ui.model_checking)
+        self.model_info({"capabilities": ["tools", "thinking"], "context_length": 16384})
+        self.assertFalse(self.ui.model_checking)
+        self.assertTrue(self.ui.model_tool_support)
+
+    def test_hardware_label_reports_real_memory_without_estimated_speed(self):
+        self.ui._handle_event("hardware_info", {"gpus": [{"name": "NVIDIA RTX 5060",
+                              "total_mb": 8192, "free_mb": 5632, "used_mb": 2560}]}, None)
+        label = self.ui.hardware_label.cget("text")
+        self.assertIn("NVIDIA RTX 5060", label)
+        self.assertIn("5.5 / 8.0 GB", label)
+        self.assertNotIn("tokens", label)
+        self.assertIsNone(self.ui.last_tokens_per_second)
+
+    def wait_for_model_operation(self):
+        deadline = time.monotonic() + 3
+        while self.ui.downloading and time.monotonic() < deadline:
+            self.root.update()
+            time.sleep(0.01)
+        self.assertFalse(self.ui.downloading, "Model operation did not finish")
+
+    def test_custom_download_requires_click_and_selects_downloaded_model(self):
+        with patch("runtime.pull_model") as download, patch.object(self.ui, "connect") as connect:
+            self.ui.toggle_settings()
+            self.ui.download_name_var.set("custom-model:4b")
+            self.ui.profile_var.set(app.PROFILE_LABELS["rtx5080"])
+            self.ui._profile_changed()
+            download.assert_not_called()
+            self.ui.custom_download_button.invoke()
+            self.wait_for_model_operation()
+            download.assert_called_once()
+            self.assertEqual(download.call_args.args, ("custom-model:4b",))
+            connect.assert_called_once()
+        self.ui._handle_event("connected", {"base_url": self.ui.base_url,
+                              "models": [app.DEFAULT_MODEL, "custom-model:4b"]}, None)
+        self.assertEqual(self.ui.model_var.get(), "custom-model:4b")
+        self.assertEqual(self.ui.setup_bar.winfo_manager(), "")
+
+    def test_gguf_file_selection_waits_for_explicit_import(self):
+        gguf = self.data / "weights.gguf"
+        with patch("app.filedialog.askopenfilename", return_value=str(gguf)), \
+             patch("runtime.import_gguf") as importer, patch.object(self.ui, "connect") as connect:
+            self.ui.choose_gguf()
+            importer.assert_not_called()
+            self.ui.import_name_var.set("my-agent")
+            self.ui.import_button.invoke()
+            self.wait_for_model_operation()
+            importer.assert_called_once()
+            self.assertEqual(importer.call_args.args, ("my-agent", str(gguf)))
+            connect.assert_called_once()
+        self.ui._handle_event("connected", {"base_url": self.ui.base_url,
+                              "models": [app.DEFAULT_MODEL, "my-agent:latest"]}, None)
+        self.assertEqual(self.ui.model_var.get(), "my-agent:latest")
+
+    def test_model_operation_error_restores_controls(self):
+        self.ui.downloading = True
+        self.ui.pending_model_selection = "broken-model"
+        self.ui.model_operation_label = "Importing model"
+        self.ui._handle_event("model_download_error", {"text": "That file could not be imported."}, None)
+        self.assertFalse(self.ui.downloading)
+        self.assertIsNone(self.ui.pending_model_selection)
+        self.assertEqual(self.ui.update_button.cget("state"), "normal")
+        self.assertEqual(self.ui.custom_download_button.cget("state"), "normal")
+        self.assertIn("That file could not be imported.", self.ui.transcript.get("1.0", "end"))
+
     def test_question_callback_integrates_with_agent_and_saved_history(self):
         from agent_core import Agent
         responses = [
@@ -286,6 +407,7 @@ class DesktopTests(unittest.TestCase):
             self.ui._answer_question("Python")
 
         self.ui.think_var.set(True)
+        self.ui.profile_var.set(app.PROFILE_LABELS["rtx4070_laptop"])
         with patch.object(Agent, "_chat", side_effect=responses), patch.object(self.ui, "_show_question", side_effect=respond):
             self.ui.input.insert("1.0", "Help me choose a language")
             self.ui.send()
@@ -295,6 +417,7 @@ class DesktopTests(unittest.TestCase):
                 time.sleep(0.01)
             self.assertFalse(self.ui.busy, "The question callback did not finish")
             self.assertTrue(self.ui.agent.think)
+            self.assertEqual(self.ui.agent.performance_profile, "rtx4070_laptop")
         saved = json.loads(app.STATE.read_text())
         result = next(item for item in saved["history"] if item.get("tool_name") == "ask_user")
         self.assertEqual(json.loads(result["content"])["answer"], "Python")
