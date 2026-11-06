@@ -192,21 +192,11 @@ def get_inference_options(model: str, profile: str = "auto") -> dict:
         except ValueError:
             pass
     hardware = get_hardware_info()
-    loaded = _get("/api/ps", timeout=5).get("models", [])
-    # With several GPUs, do not attribute an unknown allocation to the first card.
-    loaded_vram = sum(int(item.get("size_vram") or 0) for item in loaded) if len(hardware.get("gpus", [])) == 1 else 0
-    proposed = _calculate_options(model, profile, hardware, metadata, loaded_vram)
-    key = (model, profile)
-    with _option_lock:
-        previous = _option_cache.get(key)
-        # A reduced budget takes effect immediately. Small upward fluctuations wait
-        # 60s so every model turn does not trigger an expensive model reload.
-        if previous and proposed["num_gpu"] > previous[1]["num_gpu"] and time.monotonic() - previous[0] < 60:
-            return dict(previous[1])
-        if previous and proposed == previous[1]:
-            return dict(proposed)
-        _option_cache[key] = (time.monotonic(), dict(proposed))
-    return proposed
+    # -1 asks Ollama's scheduler to fit layers dynamically using the actual
+    # weights, projector, context and device memory. A tag-size heuristic can
+    # underestimate offload, especially for hybrid vision models. The engine
+    # also owns unloading/reusing resident models and multi-GPU placement.
+    return {"num_ctx": context, "num_gpu": -1 if hardware.get("gpus") else 0}
 
 
 def import_gguf(model: str, path: str | Path, *, progress=None) -> None:

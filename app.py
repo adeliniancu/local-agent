@@ -1569,6 +1569,7 @@ class LocalAgentApp:
                                f"{gpu.get('total_mb', 0) / 1024:.1f} GB VRAM available")
                 if len(gpus) > 1:
                     description += f" · {len(gpus)} GPUs detected"
+                description += " · Automatic GPU allocation; speed depends on model and free VRAM"
             else:
                 description = "No NVIDIA GPU detected · CPU inference available"
             if os.environ.get("LOCAL_AGENT_GPU_LAYERS") == "0":
