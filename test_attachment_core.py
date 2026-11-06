@@ -64,6 +64,62 @@ class AttachmentCoreTests(unittest.TestCase):
         self.assertEqual(user["attachments"][0]["id"], self.image["id"])
         self.assertNotIn(base64.b64encode(self.png).decode(), json.dumps(self.agent.history))
 
+    def test_image_can_be_reinspected_after_a_tool_only_first_response(self):
+        (self.workspace / "source.txt").write_text("Project source")
+        requests = []
+        def chat():
+            requests.append(self.agent._messages())
+            if len(requests) == 1:
+                function = {"name": "read_file", "arguments": {"path": "source.txt"}}
+            elif len(requests) == 2:
+                function = {"name": "read_attachment", "arguments": {"attachment_id": self.image["id"]}}
+            else:
+                return {"role": "assistant", "content": "The registered image is red."}
+            return {"role": "assistant", "content": "", "tool_calls": [{"function": function}]}
+        self.agent._chat = chat
+        self.agent.run("Read the project, then inspect the attached image", [self.image])
+        self.assertEqual([sum(len(item.get("images", [])) for item in request) for request in requests], [1, 0, 1])
+        self.assertEqual(requests[2][-1]["role"], "user")
+        self.assertIn("not a new user request", requests[2][-1]["content"])
+        self.assertEqual(requests[2][-2]["tool_name"], "read_attachment")
+        self.assertEqual(sum(item["role"] == "user" for item in self.agent._records()), 1)
+        self.assertTrue(self.agent._records()[0]["_images_processed"])
+        self.assertNotIn(base64.b64encode(self.png).decode(), json.dumps(self.agent.history))
+        self.assertFalse([data for kind, data in self.events if kind == "error"])
+
+    def test_image_reinspection_checks_vision_and_registration(self):
+        self.agent.history = [runtime.build_user_message("Reference", [self.image])]
+        self.agent.vision_supported = False
+        with self.assertRaisesRegex(ValueError, "cannot read images"):
+            self.agent._execute("read_attachment", {"attachment_id": self.image["id"]})
+        self.assertFalse(self.agent._new_image_records)
+        self.agent.vision_supported = True
+        with self.assertRaisesRegex(ValueError, "not registered"):
+            self.agent._execute("read_attachment", {"attachment_id": "a" * 64})
+        self.assertFalse(self.agent._new_image_records)
+
+    def test_reinspection_deduplicates_pending_image_and_limits_queue(self):
+        second = dict(self.image, id="b" * 64, name="second.png")
+        self.agent.history = [runtime.build_user_message("First", [self.image]),
+                              runtime.build_user_message("Second", [second])]
+        self.agent._execute("read_attachment", {"attachment_id": self.image["id"]})
+        self.agent._execute("read_attachment", {"attachment_id": self.image["id"]})
+        self.assertEqual(len(self.agent._new_image_records), 1)
+        with self.assertRaisesRegex(ValueError, "One image is already queued"):
+            self.agent._execute("read_attachment", {"attachment_id": second["id"]})
+        self.assertEqual(sum(len(item.get("images", [])) for item in self.agent._messages()), 1)
+
+    def test_eight_k_reinspection_survives_compaction_without_resetting_original_mark(self):
+        self.options.return_value = {"num_ctx": 8192, "num_gpu": 0}
+        record = runtime.build_user_message("Inspect the saved image. " + "Context " * 5000, [self.image])
+        record["_images_processed"] = True
+        self.agent.history = [record]
+        self.agent._execute("read_attachment", {"attachment_id": self.image["id"]})
+        messages = self.agent._messages(force_compact=True, aggressive=True)
+        self.assertEqual(sum(len(item.get("images", [])) for item in messages), 1)
+        self.assertLessEqual(self.agent._request_size(messages), 9500)
+        self.assertTrue(record["_images_processed"])
+
     def test_image_survives_initial_giant_message_compaction_and_failed_request(self):
         requests = []
         def chat():
