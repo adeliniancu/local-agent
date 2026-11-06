@@ -43,7 +43,7 @@ class InstallerTests(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
-        self.root = Path(self.temporary.name)
+        self.root = Path(self.temporary.name).resolve()
         self.app = self.root / "Local Agent"
         for relative in ("app.py", "runtime.py", "runtime/python/python.exe", "runtime/ollama/ollama.exe"):
             path = self.app / relative
