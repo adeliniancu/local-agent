@@ -348,19 +348,31 @@ _ATTACHMENT_IMAGE_TYPES = {".png": "image/png", ".jpg": "image/jpeg", ".jpeg": "
 
 def _attachment_dir():
     directory = ROOT / "data" / "attachments"
-    directory.mkdir(parents=True, exist_ok=True)
+    # Inspect existing parents before mkdir, so a data junction cannot create
+    # an attachments directory outside the app as a side effect of validation.
     if not directory.resolve().is_relative_to(ROOT.resolve()) or any(
             item.is_symlink() or item.is_junction() for item in (ROOT / "data", directory)):
         raise ValueError("The attachment storage folder must stay inside Local Agent's data folder.")
+    directory.mkdir(parents=True, exist_ok=True)
     return directory
 
 
+def _read_attachment_bytes(path: Path, limit: int = MAX_ATTACHMENT_BYTES) -> bytes:
+    with path.open("rb") as stream:
+        data = stream.read(limit + 1)
+    if len(data) > limit:
+        raise ValueError("The attachment exceeds the size limit.")
+    return data
+
+
 def _store_attachment_bytes(data: bytes, suffix: str) -> str:
+    if len(data) > MAX_ATTACHMENT_BYTES or not re.fullmatch(r"\.[a-z0-9]{1,12}", suffix):
+        raise ValueError("Invalid attachment size or storage extension.")
     digest = hashlib.sha256(data).hexdigest()
     name = digest + suffix
     target = _attachment_dir() / name
     if target.exists():
-        if target.is_symlink() or hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+        if target.is_symlink() or hashlib.sha256(_read_attachment_bytes(target)).hexdigest() != digest:
             raise ValueError("An existing attachment copy failed its integrity check.")
     else:
         # Concurrent pastes of identical bytes are harmless; content is immutable.
@@ -368,7 +380,7 @@ def _store_attachment_bytes(data: bytes, suffix: str) -> str:
             with target.open("xb") as handle:
                 handle.write(data)
         except FileExistsError:
-            if hashlib.sha256(target.read_bytes()).hexdigest() != digest:
+            if target.is_symlink() or hashlib.sha256(_read_attachment_bytes(target)).hexdigest() != digest:
                 raise ValueError("The attachment copy changed while being saved.")
     return name
 
@@ -386,7 +398,7 @@ def resolve_attachment_path(metadata: dict, preview: bool = False) -> Path:
         raise ValueError("The saved attachment is missing. Please attach the file again.")
     if path.stat().st_size > MAX_ATTACHMENT_BYTES:
         raise ValueError("The saved attachment exceeds the size limit.")
-    if hashlib.sha256(path.read_bytes()).hexdigest() != name.split(".", 1)[0]:
+    if hashlib.sha256(_read_attachment_bytes(path)).hexdigest() != name.split(".", 1)[0]:
         raise ValueError("The saved attachment changed. Please attach the file again.")
     return path
 
@@ -397,7 +409,8 @@ def _attachment_powershell(script: str, payload: dict, timeout: int = 40):
     preamble = "$ErrorActionPreference='Stop'; [Console]::OutputEncoding=[Text.UTF8Encoding]::new($false); "
     preamble += "$p=[Console]::In.ReadToEnd() | ConvertFrom-Json; "
     encoded = base64.b64encode((preamble + script).encode("utf-16-le")).decode("ascii")
-    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded],
+    powershell = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32/WindowsPowerShell/v1.0/powershell.exe"
+    result = subprocess.run([str(powershell), "-NoProfile", "-NonInteractive", "-STA", "-EncodedCommand", encoded],
                             input=json.dumps(payload, ensure_ascii=True), capture_output=True, text=True,
                             encoding="utf-8", errors="replace", timeout=timeout,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
@@ -409,7 +422,54 @@ def _attachment_powershell(script: str, payload: dict, timeout: int = 40):
         raise ValueError("Windows returned unreadable image information.") from error
 
 
+def _attachment_image_dimensions(data: bytes) -> tuple[int, int]:
+    """Bound common raster headers before invoking a native image decoder."""
+    import struct
+    width = height = 0
+    if data.startswith(b"\x89PNG\r\n\x1a\n") and len(data) >= 24 and data[12:16] == b"IHDR":
+        width, height = struct.unpack(">II", data[16:24])
+    elif data[:6] in (b"GIF87a", b"GIF89a") and len(data) >= 10:
+        width, height = struct.unpack("<HH", data[6:10])
+    elif data.startswith(b"BM") and len(data) >= 26:
+        dib_size = struct.unpack("<I", data[14:18])[0]
+        if dib_size == 12:
+            width, height = struct.unpack("<HH", data[18:22])
+        elif dib_size >= 40:
+            width, height = struct.unpack("<ii", data[18:26])
+            height = abs(height)
+    elif data.startswith(b"\xff\xd8"):
+        position = 2
+        while position < len(data):
+            if data[position] != 255:
+                break
+            while position < len(data) and data[position] == 255:
+                position += 1
+            if position >= len(data):
+                break
+            marker = data[position]
+            position += 1
+            if marker in (0xD9, 0xDA):
+                break
+            if marker == 0x01 or 0xD0 <= marker <= 0xD8:
+                continue
+            if position + 2 > len(data):
+                break
+            size = int.from_bytes(data[position:position + 2], "big")
+            if size < 2 or position + size > len(data):
+                break
+            if marker in {0xC0, 0xC1, 0xC2, 0xC3, 0xC5, 0xC6, 0xC7, 0xC9, 0xCA, 0xCB, 0xCD, 0xCE, 0xCF} and size >= 8:
+                height, width = struct.unpack(">HH", data[position + 3:position + 7])
+                break
+            position += size
+    if width <= 0 or height <= 0:
+        raise ValueError("This file is not a readable PNG, JPEG, GIF, or BMP image.")
+    if width * height > 40_000_000:
+        raise ValueError("The image has too many pixels. Attach an image of 40 megapixels or smaller.")
+    return width, height
+
+
 def _prepare_attachment_image(source: Path) -> tuple[str, str]:
+    _attachment_image_dimensions(_read_attachment_bytes(source))
     # System.Drawing is part of Windows; no pip packages or account are needed.
     script = r'''
 Add-Type -AssemblyName System.Drawing
@@ -433,9 +493,12 @@ try {
     with tempfile.TemporaryDirectory(prefix="image-", dir=_attachment_dir()) as temp:
         image, preview = Path(temp) / "image.png", Path(temp) / "preview.png"
         _attachment_powershell(script, {"source": str(source), "image": str(image), "preview": str(preview)})
-        image_data, preview_data = image.read_bytes(), preview.read_bytes()
+        image_data = _read_attachment_bytes(image, 8 * 1024 * 1024)
+        preview_data = _read_attachment_bytes(preview, 1024 * 1024)
         if len(image_data) > 8 * 1024 * 1024 or not image_data.startswith(b"\x89PNG\r\n\x1a\n"):
             raise ValueError("The prepared image is too large or invalid.")
+        _attachment_image_dimensions(image_data)
+        _attachment_image_dimensions(preview_data)
         return _store_attachment_bytes(image_data, ".png"), _store_attachment_bytes(preview_data, ".png")
 
 
@@ -451,7 +514,8 @@ def _attachment_document_text(path: Path) -> str:
         if info.file_size > 12 * 1024 * 1024:
             raise ValueError("The document text is too large.")
         xml = archive.read(info)
-    if b"<!DOCTYPE" in xml.upper() or b"<!ENTITY" in xml.upper():
+    declarations = xml.replace(b"\0", b"").upper()
+    if b"<!DOCTYPE" in declarations or b"<!ENTITY" in declarations:
         raise ValueError("XML entity declarations are not supported in attachments.")
     root = ET.fromstring(xml)
     ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -473,7 +537,7 @@ def prepare_attachment(path: str | Path) -> dict:
         raise ValueError("Choose a file, not a folder.")
     if source.stat().st_size > MAX_ATTACHMENT_BYTES:
         raise ValueError("Each attachment must be 25 MB or smaller.")
-    data = source.read_bytes()
+    data = _read_attachment_bytes(source)
     if len(data) > MAX_ATTACHMENT_BYTES:
         raise ValueError("The attachment grew beyond the 25 MB limit.")
     suffix = source.suffix.lower()
@@ -518,12 +582,17 @@ def clipboard_attachments(root=None) -> list[dict]:
     """Read files or a bitmap only when Paste is invoked. Empty means normal text."""
     script = r'''
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
 if ([Windows.Forms.Clipboard]::ContainsFileDropList()) {
- $files=@([Windows.Forms.Clipboard]::GetFileDropList() | ForEach-Object { [string]$_ })
+ $files=@([Windows.Forms.Clipboard]::GetFileDropList() | Select-Object -First 9 | ForEach-Object { [string]$_ })
+ if ($files.Count -gt 8) { throw 'Paste up to 8 files at a time' }
  @{files=$files} | ConvertTo-Json -Compress
 } elseif ([Windows.Forms.Clipboard]::ContainsImage()) {
  $image=[Windows.Forms.Clipboard]::GetImage()
- try { $image.Save($p.image,[Drawing.Imaging.ImageFormat]::Png) } finally { $image.Dispose() }
+ try {
+  if (($image.Width * [long]$image.Height) -gt 40000000) { throw 'Image has too many pixels' }
+  $image.Save($p.image,[Drawing.Imaging.ImageFormat]::Png)
+ } finally { $image.Dispose() }
  @{image=$true} | ConvertTo-Json -Compress
 } else { '{}' }
 '''
@@ -546,7 +615,7 @@ def read_attachment(metadata: dict, start: int = 0, max_chars: int = 6000) -> di
     if isinstance(max_chars, bool) or not isinstance(max_chars, int) or not 1 <= max_chars <= 12000:
         raise ValueError("max_chars must be from 1 to 12000.")
     path = resolve_attachment_path({"path": metadata.get("text_path", "")})
-    text = path.read_text(encoding="utf-8")
+    text = _read_attachment_bytes(path).decode("utf-8")
     end = min(len(text), start + max_chars)
     return {"name": metadata.get("name"), "start": start, "end": end, "total_chars": len(text),
             "text": text[start:end], "more": end < len(text)}
@@ -591,7 +660,7 @@ def model_message(record: dict, vision_supported: bool, include_images: bool = T
         encoded = []
         for item in images:
             path = resolve_attachment_path({"path": item.get("image", "")})
-            data = path.read_bytes()
+            data = _read_attachment_bytes(path, 8 * 1024 * 1024)
             if not data.startswith(b"\x89PNG\r\n\x1a\n"):
                 raise ValueError("The stored image is not a valid prepared PNG.")
             encoded.append(base64.b64encode(data).decode("ascii"))
