@@ -47,8 +47,6 @@ PERFORMANCE_PROFILES = {
 }
 _hardware_cache = (0.0, None)
 _hardware_lock = threading.Lock()
-_option_cache = {}
-_option_lock = threading.Lock()
 
 
 def _validate_model_name(model: str) -> str:
@@ -145,36 +143,6 @@ def _context_length(metadata: dict) -> int:
     if maximum < 8192:
         raise ValueError("This model supports fewer than 8,192 context tokens. Choose a model with at least 8K context for this agent.")
     return min(16384, maximum)
-
-
-def _calculate_options(model: str, profile: str, hardware: dict, metadata: dict, loaded_vram: int = 0) -> dict:
-    context = _context_length(metadata)
-    options = {"num_ctx": context, "num_gpu": 0}
-    if profile == "cpu" or not hardware.get("gpus"):
-        return options
-    gpu = hardware["gpus"][0]
-    # Add back an existing model allocation once, then keep 512 MiB for the display
-    # and other apps. Profile labels never override actual detected memory.
-    available_mb = min(float(gpu["total_mb"]), float(gpu["free_mb"]) + loaded_vram / 1048576)
-    budget_mb = max(0.0, available_mb - 512)
-    blocks = int(metadata.get("block_count") or 0)
-    size_mb = int(metadata.get("size_bytes") or 0) / 1048576
-    if blocks <= 0 or size_mb <= 0:
-        return options
-    layers = blocks + 1
-    kv_mb = int(metadata.get("kv_bytes_per_token") or 32768) * context / 1048576
-    full_mb = size_mb * 1.08 + kv_mb + 512
-    if budget_mb >= full_mb:
-        options["num_gpu"] = layers
-    elif model == MODEL and context == 16384 and blocks == 32:
-        # Measured Windows Q4_K_M allocations at 10/20/26 layers: 1488/2253/2760 MiB.
-        # Keep margin and cap partial offload at the tested 26 layers. Full offload
-        # still requires the separate full-model budget above.
-        options["num_gpu"] = max(0, min(26, int((budget_mb - 700) / 84)))
-    else:
-        per_layer = (size_mb * 1.08 + kv_mb) / layers
-        options["num_gpu"] = max(0, min(blocks, int((budget_mb - 512) / per_layer)))
-    return options
 
 
 def get_inference_options(model: str, profile: str = "auto") -> dict:

@@ -20,40 +20,17 @@ def hardware(free=1952, total=8151):
 
 
 class AllocationTests(unittest.TestCase):
-    def setUp(self):
-        runtime._option_cache.clear()
+    def test_all_gpu_profiles_use_engine_dynamic_allocation_for_any_model(self):
+        for profile in ('auto', 'rtx5060', 'rtx4070_laptop', 'rtx5080'):
+            for model, info in ((runtime.MODEL, QWEN_INFO), ('custom:20b', {**QWEN_INFO, 'size_bytes':20*1024**3}), ('custom:8k', {**QWEN_INFO, 'context_length':8192})):
+                with self.subTest(profile=profile, model=model), patch.dict(os.environ, {}, clear=True), patch.object(runtime, 'get_model_info', return_value=info), patch.object(runtime, 'get_hardware_info', return_value=hardware(800)):
+                    result=runtime.get_inference_options(model, profile)
+                    self.assertEqual(-1,result['num_gpu'])
+                    self.assertEqual(min(16384,info['context_length']),result['num_ctx'])
 
-    def test_existing_5060_budget_selects_tested_26_layers_at_16k(self):
-        result = runtime._calculate_options(runtime.MODEL, "auto", hardware(), QWEN_INFO, 1488 * MIB)
-        self.assertEqual({"num_gpu": 26, "num_ctx": 16384}, result)
-
-    def test_marketing_profile_cannot_invent_vram_or_double_layers(self):
-        results = [runtime._calculate_options(runtime.MODEL, profile, hardware(), QWEN_INFO, 1488 * MIB)
-                   for profile in ("auto", "rtx5060", "rtx4070_laptop", "rtx5080")]
-        self.assertTrue(all(result == results[0] for result in results))
-
-    def test_more_available_vram_allows_full_offload(self):
-        result = runtime._calculate_options(runtime.MODEL, "rtx5080", hardware(14000, 16384), QWEN_INFO)
-        self.assertEqual(33, result["num_gpu"])
-
-    def test_low_free_memory_reduces_layers(self):
-        low = runtime._calculate_options(runtime.MODEL, "auto", hardware(800), QWEN_INFO)
-        self.assertEqual(0, low["num_gpu"])
-        limited = runtime._calculate_options(runtime.MODEL, "auto", hardware(2300), QWEN_INFO)
-        self.assertGreater(limited["num_gpu"], 0)
-        self.assertLess(limited["num_gpu"], 26)
-
-    def test_unknown_model_size_or_absent_gpu_uses_cpu(self):
-        self.assertEqual(0, runtime._calculate_options("custom", "auto", hardware(), {})["num_gpu"])
-        self.assertEqual(0, runtime._calculate_options(runtime.MODEL, "auto", {"gpus": []}, QWEN_INFO)["num_gpu"])
-
-    def test_custom_model_size_and_context_are_respected(self):
-        info = {"block_count": 40, "size_bytes": 20 * 1024 ** 3, "context_length": 8192,
-                "kv_bytes_per_token": 100000}
-        result = runtime._calculate_options("custom:local", "rtx5080", hardware(7000), info)
-        self.assertEqual(8192, result["num_ctx"])
-        self.assertGreater(result["num_gpu"], 0)
-        self.assertLess(result["num_gpu"], 20)
+    def test_no_detected_gpu_uses_cpu(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(runtime, 'get_model_info', return_value=QWEN_INFO), patch.object(runtime,'get_hardware_info',return_value={'gpus':[]}):
+            self.assertEqual({'num_ctx':16384,'num_gpu':0},runtime.get_inference_options(runtime.MODEL))
 
     def test_cpu_and_launcher_override_skip_gpu_probe_but_validate_model(self):
         with patch.dict(os.environ, {"LOCAL_AGENT_GPU_LAYERS": "26"}), \
@@ -90,23 +67,10 @@ class AllocationTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runtime.get_inference_options(runtime.MODEL, "imaginary GPU")
 
-    def test_current_model_memory_added_once_and_upward_changes_stabilize(self):
-        now = [100.0]
-        gpu = [hardware(2300)]
-        with patch.dict(os.environ, {}, clear=True), \
-                patch.object(runtime, "get_model_info", return_value=QWEN_INFO), \
-                patch.object(runtime, "get_hardware_info", side_effect=lambda: gpu[0]), \
-                patch.object(runtime, "_get", return_value={"models": [{"size_vram": 0}]}), \
-                patch.object(runtime.time, "monotonic", side_effect=lambda: now[0]):
-            low = runtime.get_inference_options(runtime.MODEL)
-            gpu[0] = hardware(4000)
-            now[0] += 2
-            self.assertEqual(low, runtime.get_inference_options(runtime.MODEL))
-            now[0] += 60
-            high = runtime.get_inference_options(runtime.MODEL)
-            self.assertGreater(high["num_gpu"], low["num_gpu"])
-            gpu[0] = hardware(800)
-            self.assertEqual(0, runtime.get_inference_options(runtime.MODEL)["num_gpu"])
+    def test_dynamic_allocation_does_not_poll_resident_model_memory(self):
+        with patch.dict(os.environ, {}, clear=True), patch.object(runtime,'get_model_info',return_value=QWEN_INFO), patch.object(runtime,'get_hardware_info',return_value=hardware()), patch.object(runtime,'_get') as request:
+            self.assertEqual(-1,runtime.get_inference_options(runtime.MODEL)['num_gpu'])
+            request.assert_not_called()
 
 
 class ModelMetadataTests(unittest.TestCase):
