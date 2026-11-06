@@ -42,6 +42,17 @@ class RetrievalToolTests(unittest.TestCase):
             self.assertEqual(self.agent._search_files('missing_symbol')['matches'], '')
         retrieve.assert_not_called()
 
+    def test_real_fallback_finds_code_and_returns_exact_source_offsets(self):
+        result = self.agent._search_files('calculate expense total')
+        self.assertEqual(result['matches'], '')
+        related = result['related_context']
+        self.assertEqual(related['retrieval'], 'local_keyword')
+        self.assertTrue(related['passages'])
+        for passage in related['passages']:
+            source = (self.root / passage['path']).read_text()
+            self.assertEqual(source[passage['start']:passage['end']], passage['content'])
+        self.assertFalse(self.agent._file_versions)
+
     def test_invalid_scope_is_rejected_before_retrieval(self):
         with patch('runtime.retrieve_project_context', create=True) as retrieve:
             with self.assertRaisesRegex(ValueError, 'selected project'):
