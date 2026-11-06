@@ -19,6 +19,10 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 STATE = DATA / "last-chat.json"
 DEFAULT_MODEL = "qwen3.5:4b-q4_K_M"
+PROFILE_LABELS = {
+    "auto": "Auto", "rtx5060": "RTX 5060 desktop", "rtx4070_laptop": "RTX 4070 laptop",
+    "rtx5080": "RTX 5080 desktop", "cpu": "CPU",
+}
 try:
     from version import __version__ as APP_VERSION
 except ImportError:
@@ -43,6 +47,7 @@ class LocalAgentApp:
         self.busy = False
         self.ready = False
         self.connecting = False
+        self.background_enabled = start_engine
         self.downloading = False
         self.updating = False
         self.cancel = threading.Event()
@@ -53,6 +58,18 @@ class LocalAgentApp:
         self.elapsed_seconds = 0.0
         self.last_tokens_per_second: float | None = None
         self.reason_more = False
+        self.performance_profile = "auto"
+        self.settings_expanded = False
+        self.available_models: list[str] | None = None
+        self.model_tool_support: bool | None = None
+        self.model_thinking_support: bool | None = None
+        self.model_info_name = ""
+        self.model_checking = False
+        self.model_check_serial = 0
+        self.hardware_checking = False
+        self.import_path: str | None = None
+        self.pending_model_selection: str | None = None
+        self.model_operation_label = "Downloading model"
         self.memory_state: dict = {}
         self.history: list[dict] = []
         self.agent = None
@@ -203,8 +220,49 @@ class LocalAgentApp:
         header = tk.Frame(main, bg=COLORS["bg"])
         header.pack(fill="x", padx=30, pady=(27, 18))
         self._label(header, "Let's get to work.", size=19, bold=True).pack(side="left")
-        self._label(header, "LOCAL  /  PRIVATE", size=8, color=COLORS["mint"], bold=True).pack(side="right", pady=6)
+        self.settings_toggle = self._button(header, "Models & performance ▾", self.toggle_settings)
+        self.settings_toggle.configure(pady=6, padx=9, font=("Segoe UI", 9))
+        self.settings_toggle.pack(side="right")
         tk.Frame(main, bg=COLORS["border"], height=1).pack(fill="x", padx=30)
+
+        self.settings_panel = tk.Frame(main, bg=COLORS["panel"], padx=12, pady=10)
+        self.settings_panel.grid_columnconfigure(1, weight=1)
+        self._label(self.settings_panel, "Performance", size=9).grid(row=0, column=0, sticky="w", padx=(0, 9))
+        self.profile_var = tk.StringVar(value=PROFILE_LABELS[self.performance_profile])
+        self.profile_box = ttk.Combobox(self.settings_panel, textvariable=self.profile_var, values=list(PROFILE_LABELS.values()),
+                                      state="readonly", font=("Segoe UI", 9), width=24)
+        self.profile_box.grid(row=0, column=1, columnspan=2, sticky="ew", padx=(0, 8))
+        self.profile_box.bind("<<ComboboxSelected>>", self._profile_changed)
+        self._label(self.settings_panel, "Next task", size=8, color=COLORS["muted"]).grid(row=0, column=3, sticky="e")
+        self.hardware_label = self._label(self.settings_panel, "Hardware information will appear here.", size=8,
+                                         color=COLORS["muted"], wraplength=500, justify="left", anchor="w")
+        self.hardware_label.grid(row=1, column=0, columnspan=4, sticky="ew", pady=(7, 8))
+        self._label(self.settings_panel, "Download model", size=9).grid(row=2, column=0, sticky="w", padx=(0, 9))
+        self.download_name_var = tk.StringVar(value=DEFAULT_MODEL)
+        entry_style = dict(bg=COLORS["side"], fg=COLORS["text"], insertbackground=COLORS["mint"],
+                           relief="flat", font=("Segoe UI", 9), highlightthickness=1,
+                           highlightbackground=COLORS["border"], highlightcolor=COLORS["mint"])
+        self.download_name_entry = tk.Entry(self.settings_panel, textvariable=self.download_name_var, **entry_style)
+        self.download_name_entry.grid(row=2, column=1, columnspan=2, sticky="ew", ipady=6, padx=(0, 8))
+        self.custom_download_button = self._button(self.settings_panel, "Download", self.download_custom_model)
+        self.custom_download_button.configure(padx=10, pady=6, font=("Segoe UI", 9))
+        self.custom_download_button.grid(row=2, column=3, sticky="ew")
+        self._label(self.settings_panel, "Import GGUF", size=9).grid(row=3, column=0, sticky="w", padx=(0, 9), pady=(8, 0))
+        self.import_name_var = tk.StringVar(value="my-model")
+        self.import_name_entry = tk.Entry(self.settings_panel, textvariable=self.import_name_var, **entry_style)
+        self.import_name_entry.grid(row=3, column=1, sticky="ew", ipady=6, padx=(0, 8), pady=(8, 0))
+        self.choose_gguf_button = self._button(self.settings_panel, "Choose file", self.choose_gguf)
+        self.choose_gguf_button.configure(padx=9, pady=6, font=("Segoe UI", 9))
+        self.choose_gguf_button.grid(row=3, column=2, padx=(0, 8), pady=(8, 0))
+        self.import_button = self._button(self.settings_panel, "Import", self.import_model, state="disabled")
+        self.import_button.configure(padx=10, pady=6, font=("Segoe UI", 9))
+        self.import_button.grid(row=3, column=3, sticky="ew", pady=(8, 0))
+        self.gguf_label = self._label(self.settings_panel, "Choose a local .gguf file and give it a model name.", size=8,
+                                     color=COLORS["muted"], wraplength=500, justify="left", anchor="w")
+        self.gguf_label.grid(row=4, column=0, columnspan=4, sticky="ew", pady=(6, 0))
+        self.model_capability_label = self._label(self.settings_panel, "Tool support: not checked yet.", size=8,
+                                                 color=COLORS["muted"], wraplength=500, justify="left", anchor="w")
+        self.model_capability_label.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(7, 0))
 
         self.setup_bar = tk.Frame(main, bg=COLORS["panel"], padx=12, pady=10)
         self._label(self.setup_bar, "Download your local model\nonce to get started.", size=9,
