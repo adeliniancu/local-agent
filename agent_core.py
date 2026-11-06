@@ -1273,7 +1273,7 @@ class Agent:
     def _progress_signature(self, name: str, arguments: dict, result: dict) -> str | None:
         """A bounded heuristic: new evidence/file states count, repeated outputs do not."""
         if (not isinstance(result, dict) or result.get("error") or result.get("skipped")
-                or result.get("unchanged") or result.get("exit_code", 0) != 0
+                or result.get("unchanged") or result.get("exit_code", 0) not in (None, 0)
                 or name == "set_plan"):
             return None
         if (name == "read_file" and isinstance(result.get("sha256"), str)
