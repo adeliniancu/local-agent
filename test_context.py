@@ -184,6 +184,52 @@ class ContextTests(unittest.TestCase):
             self.assertEqual(self.agent.history[0][CONTEXT_STATE]["compactions"], 1)
             self.assert_valid_protocol(messages)
 
+    def test_eight_k_context_scales_budgets_and_survives_reload(self):
+        self.agent._inference_options_cache = {"num_ctx": 8192, "num_gpu": 0}
+        (Path(self.temp.name) / "AGENTS.md").write_text('Preserve user files. "\\"\n' * 3000, encoding="utf-8")
+        original = [{"role": "user", "content": "Keep the original goal. " + '日本語 "\\" ' * 8000}]
+        self.agent.history = copy.deepcopy(original)
+        messages = self.agent._messages()
+        self.assertLessEqual(self.agent._request_size(messages), 14000)
+        self.assertEqual(self.agent._context_state()[CONTEXT_STATE]["context_tokens"], 8192)
+        messages = self.agent._messages(force_compact=True, aggressive=True)
+        self.assertLessEqual(self.agent._request_size(messages), 10000)
+        self.assertEqual(self.agent._records(), original)
+        self.agent.history = json.loads(json.dumps(self.agent.history))
+        self.assertIsNotNone(self.agent._context_state())
+        self.assert_valid_protocol(self.agent._messages())
+
+    def test_eight_k_context_retry_preserves_completed_tools(self):
+        self.agent._inference_options_cache = {"num_ctx": 8192, "num_gpu": 0}
+        records = [{"role": "user", "content": "Continue the existing task. " * 2000}]
+        records += tool_group("write_file", {"path": "saved.txt", "content": "saved"}, {"path": "saved.txt", "bytes_written": 5})
+        self.agent.history = copy.deepcopy(records)
+        requests = []
+        def model():
+            requests.append(self.agent._messages())
+            if len(requests) == 1:
+                raise RuntimeError("context length exceeded")
+            return {"role": "assistant", "content": "Continue from the saved work."}
+        self.agent._chat_once = model
+        self.assertEqual(self.agent._chat()["content"], "Continue from the saved work.")
+        self.assertEqual(len(requests), 2)
+        self.assertLessEqual(self.agent._request_size(requests[-1]), 10000)
+        self.assertEqual(self.agent._records(), records)
+        self.assert_valid_protocol(requests[-1])
+
+    def test_eight_k_exact_history_page_survives_compaction(self):
+        self.agent._inference_options_cache = {"num_ctx": 8192, "num_gpu": 0}
+        self.agent.history = [{"role": "user", "content": "Inspect the file and preserve the exact requirements."}]
+        self.agent.history += tool_group("read_file", {"path": "source.py"}, {"content": "EXACT_PAGE_SENTINEL " + '日本語 "\\" ' * 4000})
+        self.agent._messages(force_compact=True, aggressive=True)
+        result = self.agent._read_working_history(message_index=2, max_chars=6000)
+        self.agent.history += tool_group("read_working_history", {"message_index": 2, "max_chars": 6000}, result)
+        messages = self.agent._messages()
+        self.assertLessEqual(self.agent._request_size(messages), 10000)
+        self.assertTrue(any(item.get("role") == "tool" and item.get("tool_name") == "read_working_history"
+                            and "EXACT_PAGE_SENTINEL" in item["content"] for item in messages))
+        self.assert_valid_protocol(messages)
+
     def test_large_read_explains_exact_retrieval_instead_of_repeating_read(self):
         self.agent.history = [{"role": "user", "content": "Inspect the source"}]
         self.agent.history += tool_group("read_file", {"path": "source.py"}, {"content": "important_start = 1\n" + "large " * 10000})

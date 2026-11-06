@@ -419,6 +419,21 @@ class StreamTests(unittest.TestCase):
             self.assertEqual(events[-1][0], "done")
             self.assertFalse(any(kind == "error" for kind, _ in events))
 
+    def test_eight_k_model_has_scaled_response_limit(self):
+        requests = []
+        def respond(handler):
+            requests.append(handler.request_payload)
+            handler.send_response(200)
+            handler.end_headers()
+            handler.wfile.write(b'{"message":{"content":"Done."},"done":true}\n')
+        endpoint = self.run_server(respond)
+        self.resolve_options.return_value = {"num_ctx": 8192, "num_gpu": 0}
+        with tempfile.TemporaryDirectory() as workspace:
+            agent = Agent(workspace, lambda *_: None, lambda *_: True, threading.Event(), base_url=endpoint)
+            agent._chat()
+        self.assertEqual(requests[0]["options"]["num_ctx"], 8192)
+        self.assertEqual(requests[0]["options"]["num_predict"], 2048)
+
     def test_stop_during_silent_inference_returns_promptly(self):
         release = threading.Event()
         def respond(handler):
