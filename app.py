@@ -421,7 +421,128 @@ class LocalAgentApp:
         return {}
 
     def _can_send(self):
-        return self.ready and not self.updating and not self.closing and self.workspace.is_dir() and not (self.busy and self.cancel.is_set())
+        unsupported = self.model_info_name == self.model_var.get().strip() and self.model_tool_support is False
+        return (self.ready and not self.updating and not self.downloading and not self.model_checking and not unsupported
+                and not self.closing and self.workspace.is_dir() and not (self.busy and self.cancel.is_set()))
+
+    def toggle_settings(self):
+        self.settings_expanded = not self.settings_expanded
+        self.settings_toggle.configure(text="Models & performance ▴" if self.settings_expanded else "Models & performance ▾")
+        if self.settings_expanded:
+            self.setup_bar.pack_forget()
+            self.settings_panel.pack(fill="x", padx=30, pady=(10, 0), before=self.transcript_frame)
+            self.refresh_hardware()
+            self.refresh_model_info()
+        else:
+            self.settings_panel.pack_forget()
+            if self.available_models == []:
+                self.setup_bar.pack(fill="x", padx=30, pady=(12, 0), before=self.transcript_frame)
+        self._update_model_controls()
+
+    def _selected_profile(self):
+        return next((key for key, label in PROFILE_LABELS.items() if label == self.profile_var.get()), "auto")
+
+    def _profile_changed(self, _event=None):
+        if self.busy or self.downloading or self.updating:
+            return
+        self.performance_profile = self._selected_profile()
+        self._save_state()
+        self.status_label.configure(text="Performance profile saved. It applies to your next task.")
+
+    def _update_model_controls(self):
+        blocked = self.busy or self.downloading or self.connecting or self.updating or self.closing
+        state = "disabled" if blocked else "normal"
+        for widget in (self.download_name_entry, self.custom_download_button, self.import_name_entry, self.choose_gguf_button):
+            widget.configure(state=state)
+        self.import_button.configure(state="normal" if self.import_path and not blocked else "disabled")
+        self.profile_box.configure(state="disabled" if blocked else "readonly")
+        self.model_box.configure(state=state)
+        self.think_box.configure(state="disabled" if blocked or self.model_thinking_support is False else "normal")
+        self.download_button.configure(state=state)
+        self.send_button.configure(state="normal" if self._can_send() else "disabled")
+
+    def refresh_hardware(self):
+        if not self.background_enabled or self.hardware_checking or self.closing:
+            return
+        self.hardware_checking = True
+
+        def worker():
+            try:
+                import runtime
+                self.events.put(("hardware_info", runtime.get_hardware_info(), None))
+            except Exception as exc:
+                self.events.put(("hardware_error", {"text": str(exc)}, None))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def refresh_model_info(self):
+        if not self.background_enabled or not self.ready or self.busy or self.closing:
+            return
+        model = self.model_var.get().strip()
+        if not model:
+            return
+        self.model_check_serial += 1
+        serial = self.model_check_serial
+        self.model_checking = True
+        self.model_capability_label.configure(text=f"Checking tool support for {model}…", fg=COLORS["muted"])
+        self.send_button.configure(state="disabled")
+
+        def worker():
+            try:
+                import runtime
+                info = runtime.get_model_info(model)
+                self.events.put(("model_info", {"model": model, "serial": serial, "info": info}, None))
+            except Exception as exc:
+                self.events.put(("model_info_error", {"model": model, "serial": serial, "text": str(exc)}, None))
+        threading.Thread(target=worker, daemon=True).start()
+
+    def choose_gguf(self):
+        if self.busy or self.downloading or self.updating or self.connecting:
+            return
+        path = filedialog.askopenfilename(parent=self.root, title="Choose a local GGUF model",
+                                         filetypes=[("GGUF models", "*.gguf")])
+        if path:
+            self.import_path = path
+            self.gguf_label.configure(text=Path(path).name)
+            self._update_model_controls()
+
+    def download_custom_model(self):
+        name = self.download_name_var.get().strip()
+        if not name:
+            self.status_label.configure(text="Enter an Ollama model name to download.")
+            return
+        self._start_model_operation("download", name)
+
+    def import_model(self):
+        name = self.import_name_var.get().strip()
+        if not name or not self.import_path:
+            self.status_label.configure(text="Choose a GGUF file and enter a model name first.")
+            return
+        self._start_model_operation("import", name, self.import_path)
+
+    def _start_model_operation(self, operation, model, path=None):
+        if self.downloading or self.connecting or self.updating or self.busy or self.closing:
+            return
+        self.downloading = True
+        self.pending_model_selection = model
+        self.model_operation_label = "Importing model" if operation == "import" else "Downloading model"
+        self.download_button.configure(text="Downloading…" if operation == "download" else "Importing…")
+        self.retry_button.configure(state="disabled")
+        self.update_button.configure(state="disabled")
+        self._update_model_controls()
+        self.status_label.configure(text=f"{self.model_operation_label}: {model}. Keep this window open.")
+
+        def worker():
+            try:
+                import runtime
+                progress = lambda event: self.events.put(("model_download_status", event, None))
+                if operation == "import":
+                    runtime.import_gguf(model, path, progress=progress)
+                else:
+                    runtime.pull_model(model, progress=progress)
+                self.events.put(("model_download_complete", {"model": model}, None))
+            except Exception as exc:
+                self.events.put(("model_download_error", {"text": str(exc)}, None))
+        threading.Thread(target=worker, daemon=True).start()
 
     def _tick(self):
         if self.closing:
@@ -442,6 +563,7 @@ class LocalAgentApp:
         try:
             import updater
             self.updating = True
+            self._update_model_controls()
             self.send_button.configure(state="disabled")
             self.update_button.configure(state="disabled")
             self.retry_button.configure(state="disabled")
@@ -452,32 +574,17 @@ class LocalAgentApp:
                     self.updating = False
                     self.update_button.configure(state="normal")
                     self.retry_button.configure(state="normal")
-                    self.send_button.configure(state="normal" if self._can_send() else "disabled")
+                    self._update_model_controls()
             dialog.bind("<Destroy>", finished, add=True)
         except Exception as exc:
             self.updating = False
             self.update_button.configure(state="normal")
             self.retry_button.configure(state="normal")
-            self.send_button.configure(state="normal" if self._can_send() else "disabled")
+            self._update_model_controls()
             messagebox.showerror("Couldn't open updater", str(exc), parent=self.root)
 
     def download_model(self):
-        if self.downloading or self.connecting or self.updating or self.busy or self.closing:
-            return
-        self.downloading = True
-        self.download_button.configure(state="disabled", text="Downloading…")
-        self.retry_button.configure(state="disabled")
-        self.update_button.configure(state="disabled")
-        self.status_label.configure(text="Downloading the local model. You can keep this window open.")
-
-        def worker():
-            try:
-                import runtime
-                runtime.pull_model(progress=lambda event: self.events.put(("model_download_status", event, None)))
-                self.events.put(("model_download_complete", {}, None))
-            except Exception as exc:
-                self.events.put(("model_download_error", {"text": str(exc)}, None))
-        threading.Thread(target=worker, daemon=True).start()
+        self._start_model_operation("download", DEFAULT_MODEL)
 
     def _render_history(self):
         for card in self.inline_cards:
