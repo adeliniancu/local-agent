@@ -642,6 +642,22 @@ class DesktopTests(unittest.TestCase):
         self.assertIn("A small code reference", message["content"])
         self.assertTrue(self.ui.agent.vision_supported)
 
+    def test_attachment_preflight_failure_restores_retry_draft(self):
+        from agent_core import Agent
+        item = self.attachment()
+        self.ui._add_attachments([item])
+        self.ui.input.insert("1.0", "Read the file")
+        with patch.object(Agent, "run", side_effect=ValueError("Attachment rejected before sending")):
+            self.ui.send()
+            deadline = time.monotonic() + 5
+            while self.ui.busy and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(0.01)
+        self.assertFalse(self.ui.busy)
+        self.assertEqual(self.ui.pending_attachments, [item])
+        self.assertEqual(self.ui.input.get("1.0", "end-1c"), "Read the file")
+        self.assertIn("returned to the composer", self.ui.status_label.cget("text"))
+
 
 if __name__ == "__main__":
     unittest.main()

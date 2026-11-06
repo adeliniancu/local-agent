@@ -1153,6 +1153,7 @@ class LocalAgentApp:
         self.run_id += 1
         run_id = self.run_id
         history = copy.deepcopy(self.history)
+        previous_user_count = sum(message.get("role") == "user" for message in history)
         self.stream_started = False
         self.stream_text = ""
         self.stream_mark = None
@@ -1225,7 +1226,10 @@ class LocalAgentApp:
                 if self.agent is not None:
                     final_history = self.agent.history
             finally:
-                emit("worker_complete", {"history": final_history})
+                result = {"history": final_history}
+                if attachments and not cancel.is_set() and sum(message.get("role") == "user" for message in final_history) <= previous_user_count:
+                    result["retry_draft"] = {"content": prompt, "attachments": attachments}
+                emit("worker_complete", result)
         self.agent = None
         self.worker = threading.Thread(target=worker, daemon=True)
         self.worker.start()
@@ -1613,6 +1617,11 @@ class LocalAgentApp:
             self._answer_approval(False)
             self._answer_question(None)
             self.history = payload.get("history", self.history)
+            retry_draft = payload.get("retry_draft")
+            if retry_draft and not self.cancel.is_set() and not self.closing:
+                self._add_attachments(retry_draft.get("attachments", []))
+                if not self.input.get("1.0", "end-1c").strip():
+                    self.input.insert("1.0", retry_draft.get("content", ""))
             pending = self._drain_incoming()
             self.queued_count = 0
             if pending and not self.cancel.is_set() and not self.closing:
@@ -1631,7 +1640,9 @@ class LocalAgentApp:
                 self.work_started = None
             self._set_busy(False)
             self._save_state()
-            self.status_label.configure(text="Stopped. You can continue with another message." if self.cancel.is_set() else "Ready for your next message.")
+            self.status_label.configure(text="Stopped. You can continue with another message." if self.cancel.is_set()
+                                        else "Attachment request returned to the composer. Check the error above, then retry." if retry_draft
+                                        else "Ready for your next message.")
             self.input.focus_set()
 
     def _poll(self):
