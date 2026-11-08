@@ -59,6 +59,7 @@ class LocalAgentApp:
         self.coding_v2_importing = False
         self.coding_v2_cancel = threading.Event()
         self.coding_v2_worker = None
+        self.preserve_model_selection_on_refresh = False
         self.updating = False
         self.cancel = threading.Event()
         self.allow_commands = threading.Event()
@@ -1074,6 +1075,8 @@ class LocalAgentApp:
     def _model_changed(self, _event=None):
         if not self.busy:
             self.model_name = self.model_var.get().strip() or DEFAULT_MODEL
+            if self.model_name in (self.available_models or []):
+                self.ready = True
             self._save_state()
             if self.model_name != self.model_info_name:
                 self.model_info_name = ""
@@ -1581,6 +1584,7 @@ class LocalAgentApp:
             self.update_button.configure(state="normal")
             if payload.get("success"):
                 self.coding_v2_status.configure(text=f"Installed. Choose {CODING_V2_MODEL} in the model list to try it.")
+                self.preserve_model_selection_on_refresh = True
                 self._update_model_controls()
                 self.connect()
             else:
@@ -1629,14 +1633,18 @@ class LocalAgentApp:
             self.available_models = list(models)
             self.model_box.configure(values=models)
             self.ready = bool(models)
+            preserve_selection = self.preserve_model_selection_on_refresh
+            self.preserve_model_selection_on_refresh = False
             requested = self.pending_model_selection
             if requested:
                 selected = next((name for name in models if name == requested or name == requested + ":latest"), None)
                 if selected:
                     self.model_var.set(selected)
             self.pending_model_selection = None
-            if self.model_var.get() not in models and models:
+            if self.model_var.get() not in models and models and not preserve_selection:
                 self.model_var.set(DEFAULT_MODEL if DEFAULT_MODEL in models else models[0])
+            if preserve_selection and self.model_var.get() not in models:
+                self.ready = False
             self.model_info_name = ""
             self.model_tool_support = self.model_thinking_support = self.model_context_support = None
             self.model_vision_support = None
@@ -1654,7 +1662,8 @@ class LocalAgentApp:
             if models and not self.workspace.is_dir():
                 self.status_label.configure(text="Your previous folder is unavailable. Choose a folder before sending a task.")
             else:
-                self.status_label.configure(text="Ready. Tell your agent what to do." if models else "Download the local model once, then you can work offline.")
+                self.status_label.configure(text="Choose an installed model from the model list to start." if models and not self.ready
+                                            else "Ready. Tell your agent what to do." if models else "Download the local model once, then you can work offline.")
             self._update_model_controls()
             self.refresh_hardware()
             self.refresh_model_info()
@@ -1887,7 +1896,7 @@ class LocalAgentApp:
         if self.worker is not None and self.worker.is_alive() and time.monotonic() - self._close_started < 15:
             self.root.after(100, self._wait_for_close)
             return
-        if self.agent is not None:
+        if self.agent is not None and self.busy:
             self.history = copy.deepcopy(self.agent.history)
         self._save_state()
         self.root.destroy()
