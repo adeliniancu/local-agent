@@ -469,6 +469,14 @@ class DesktopTests(unittest.TestCase):
             install.assert_not_called()
         self.assertFalse(self.ui.installing_coding_v2)
 
+    def test_coding_v2_installer_missing_in_older_runtime_is_unavailable_inline(self):
+        with patch("runtime.install_coding_v2", None, create=True):
+            self.ui.toggle_settings()
+            self.assertEqual(self.ui.install_coding_v2_button.cget("state"), "disabled")
+            self.ui.install_coding_v2()
+        self.assertFalse(self.ui.downloading)
+        self.assertIn("Update Local Agent", self.ui.coding_v2_status.cget("text"))
+
     def test_coding_v2_install_refreshes_choices_without_changing_model_or_chat(self):
         self.ui.history = [{"role": "user", "content": "Keep this chat"}]
         selected = self.ui.model_var.get()

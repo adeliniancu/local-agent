@@ -323,7 +323,7 @@ class LocalAgentApp:
         self.cancel_coding_v2_button = self._button(coding_v2_actions, "Cancel", self.cancel_coding_v2_install, state="disabled")
         self.cancel_coding_v2_button.configure(padx=8, pady=6, font=("Segoe UI", 9))
         self.cancel_coding_v2_button.pack(side="right", padx=(6, 6))
-        self._label(coding_v2, "Up to 3.4 GB download · 8 GB free storage required.\nExperimental trained model; review its work.",
+        self._label(coding_v2, "Up to 3.4 GB download · 8 GB free storage required.\nExperimental. The original scored better in our coding tests.",
                     size=8, color=COLORS["muted"], wraplength=480, justify="left", anchor="w").pack(fill="x", pady=(5, 0))
         self.coding_v2_status = self._label(coding_v2, CODING_V2_MODEL, size=8, color=COLORS["muted"],
                                            wraplength=480, justify="left", anchor="w")
@@ -828,13 +828,28 @@ class LocalAgentApp:
         self.send_button.configure(state="normal" if self._can_send() else "disabled")
         self.attach_button.configure(state="disabled" if self.updating or self.closing else "normal")
         installed = CODING_V2_MODEL in (self.available_models or [])
-        self.install_coding_v2_button.configure(state="disabled" if blocked or installed else "normal",
+        available = self._coding_v2_installer_available()
+        self.install_coding_v2_button.configure(state="disabled" if blocked or installed or not available else "normal",
                                                 text="Installed" if installed else "Install coding v2")
+        if not available and not installed:
+            self.coding_v2_status.configure(text="Update Local Agent to enable this installer.")
         self.cancel_coding_v2_button.configure(state="normal" if self.installing_coding_v2 and not self.coding_v2_importing
                                                and not self.coding_v2_cancel.is_set() and not self.closing else "disabled")
 
+    @staticmethod
+    def _coding_v2_installer_available():
+        try:
+            import runtime
+            return callable(getattr(runtime, "install_coding_v2", None))
+        except ImportError:
+            return False
+
     def install_coding_v2(self):
         if self.busy or self.downloading or self.connecting or self.updating or self.closing:
+            return
+        if not self._coding_v2_installer_available():
+            self.coding_v2_status.configure(text="Update Local Agent to enable this installer.")
+            self._update_model_controls()
             return
         if CODING_V2_MODEL in (self.available_models or []):
             self.coding_v2_status.configure(text=f"Already installed. Choose {CODING_V2_MODEL} in the model list.")
@@ -863,7 +878,7 @@ class LocalAgentApp:
                 self.events.put(("coding_v2_finished", {"error": str(exc)}, None))
             else:
                 self.events.put(("coding_v2_finished", {"success": True}, None))
-        # Keep Python alive until the installer's private engine is cleaned up.
+        # Keep Python alive until model registration and cleanup have finished.
         self.coding_v2_worker = threading.Thread(target=worker, daemon=False)
         self.coding_v2_worker.start()
 
