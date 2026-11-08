@@ -20,6 +20,7 @@ ROOT = Path(__file__).resolve().parent
 DATA = ROOT / "data"
 STATE = DATA / "last-chat.json"
 DEFAULT_MODEL = "qwen3.5:4b-q4_K_M"
+CODING_V2_MODEL = "qwen3.5:4b-coding-v2"
 PROFILE_LABELS = {
     "auto": "Auto", "rtx5060": "RTX 5060 desktop", "rtx4070_laptop": "RTX 4070 laptop",
     "rtx5080": "RTX 5080 desktop", "cpu": "CPU",
@@ -54,6 +55,10 @@ class LocalAgentApp:
         self.connecting = False
         self.background_enabled = start_engine
         self.downloading = False
+        self.installing_coding_v2 = False
+        self.coding_v2_importing = False
+        self.coding_v2_cancel = threading.Event()
+        self.coding_v2_worker = None
         self.updating = False
         self.cancel = threading.Event()
         self.allow_commands = threading.Event()
@@ -300,6 +305,29 @@ class LocalAgentApp:
         self.coding_preset_note = self._label(self.settings_panel, "Choose a preset to fill the download name. Download starts only when you click Download.",
                                              size=8, color=COLORS["muted"], wraplength=500, justify="left", anchor="w")
         self.coding_preset_note.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(5, 0))
+        # Keep the trained model discoverable near the top of the existing
+        # scrollable model controls, without changing the selected model.
+        for child in self.settings_panel.winfo_children():
+            info = child.grid_info()
+            if info and int(info["row"]) >= 2:
+                child.grid_configure(row=int(info["row"]) + 1)
+        coding_v2 = tk.Frame(self.settings_panel, bg=COLORS["panel"])
+        coding_v2.grid(row=2, column=0, columnspan=4, sticky="ew", pady=(0, 10))
+        coding_v2_actions = tk.Frame(coding_v2, bg=COLORS["panel"])
+        coding_v2_actions.pack(fill="x")
+        self._label(coding_v2_actions, "Coding v2 · Experimental", size=9, bold=True).pack(side="left")
+        self.install_coding_v2_button = self._button(coding_v2_actions, "Install coding v2", self.install_coding_v2)
+        self.install_coding_v2_button.configure(padx=9, pady=6, font=("Segoe UI", 9))
+        self.install_coding_v2_button.pack(side="right")
+        self.cancel_coding_v2_button = self._button(coding_v2_actions, "Cancel", self.cancel_coding_v2_install, state="disabled")
+        self.cancel_coding_v2_button.configure(padx=8, pady=6, font=("Segoe UI", 9))
+        self.cancel_coding_v2_button.pack(side="right", padx=(6, 6))
+        self._label(coding_v2, "Up to 3.4 GB download · 8 GB free storage required.\nExperimental trained model; review its work.",
+                    size=8, color=COLORS["muted"], wraplength=480, justify="left", anchor="w").pack(fill="x", pady=(5, 0))
+        self.coding_v2_status = self._label(coding_v2, CODING_V2_MODEL, size=8, color=COLORS["muted"],
+                                           wraplength=480, justify="left", anchor="w")
+        self.coding_v2_status.pack(fill="x", pady=(4, 0))
+        self.coding_v2_progress = ttk.Progressbar(coding_v2, mode="determinate", maximum=100)
 
         self.setup_bar = tk.Frame(main, bg=COLORS["panel"], padx=12, pady=10)
         self._label(self.setup_bar, "Download your local model\nonce to get started.", size=9,
@@ -798,6 +826,51 @@ class LocalAgentApp:
         self.download_button.configure(state=state)
         self.send_button.configure(state="normal" if self._can_send() else "disabled")
         self.attach_button.configure(state="disabled" if self.updating or self.closing else "normal")
+        installed = CODING_V2_MODEL in (self.available_models or [])
+        self.install_coding_v2_button.configure(state="disabled" if blocked or installed else "normal",
+                                                text="Installed" if installed else "Install coding v2")
+        self.cancel_coding_v2_button.configure(state="normal" if self.installing_coding_v2 and not self.coding_v2_importing
+                                               and not self.coding_v2_cancel.is_set() and not self.closing else "disabled")
+
+    def install_coding_v2(self):
+        if self.busy or self.downloading or self.connecting or self.updating or self.closing:
+            return
+        if CODING_V2_MODEL in (self.available_models or []):
+            self.coding_v2_status.configure(text=f"Already installed. Choose {CODING_V2_MODEL} in the model list.")
+            return
+        self.installing_coding_v2 = self.downloading = True
+        self.coding_v2_importing = False
+        self.coding_v2_cancel = threading.Event()
+        cancel = self.coding_v2_cancel
+        self.pending_model_selection = None
+        self.coding_v2_status.configure(text="Preparing the experimental model installation…")
+        self.coding_v2_progress.configure(value=0)
+        self.coding_v2_progress.pack(fill="x", pady=(5, 0))
+        self.retry_button.configure(state="disabled")
+        self.update_button.configure(state="disabled")
+        self.status_label.configure(text="Installing coding v2. Your current model will remain selected.")
+        self._update_model_controls()
+
+        def worker():
+            try:
+                import runtime
+                runtime.install_coding_v2(progress=lambda event: self.events.put(("coding_v2_progress", event, None)),
+                                          cancel_event=cancel)
+            except InterruptedError as exc:
+                self.events.put(("coding_v2_finished", {"cancelled": True, "text": str(exc)}, None))
+            except Exception as exc:
+                self.events.put(("coding_v2_finished", {"error": str(exc)}, None))
+            else:
+                self.events.put(("coding_v2_finished", {"success": True}, None))
+        # Keep Python alive until the installer's private engine is cleaned up.
+        self.coding_v2_worker = threading.Thread(target=worker, daemon=False)
+        self.coding_v2_worker.start()
+
+    def cancel_coding_v2_install(self):
+        if self.installing_coding_v2 and not self.coding_v2_importing:
+            self.coding_v2_cancel.set()
+            self.coding_v2_status.configure(text="Cancelling the download and cleaning up…")
+            self._update_model_controls()
 
     def refresh_hardware(self):
         if not self.background_enabled or self.hardware_checking or self.closing:
@@ -1482,7 +1555,42 @@ class LocalAgentApp:
     def _handle_event(self, event, payload, run_id):
         if run_id is not None and run_id != self.run_id:
             return
-        if event == "attachments_prepared":
+        if event == "coding_v2_progress":
+            if not self.installing_coding_v2:
+                return
+            kind = payload.get("kind")
+            if kind == "progress":
+                done, total = payload.get("done", 0), payload.get("total", 0)
+                percent = max(0, min(100, 100 * done / total)) if total else 0
+                self.coding_v2_progress.configure(value=percent)
+                if not self.coding_v2_cancel.is_set():
+                    self.coding_v2_status.configure(text=f"Downloading and verifying: {percent:.0f}% · {done / 1e9:.2f} / {total / 1e9:.2f} GB")
+            elif kind == "importing":
+                self.coding_v2_importing = True
+                self.coding_v2_status.configure(text="Registering the verified model. This final step must finish before closing.")
+                self._update_model_controls()
+            elif kind == "success":
+                self.coding_v2_status.configure(text="Finishing installation and cleaning up…")
+            elif not self.coding_v2_cancel.is_set():
+                self.coding_v2_status.configure(text=str(payload.get("text", "Installing coding v2…")))
+        elif event == "coding_v2_finished":
+            self.installing_coding_v2 = self.downloading = False
+            self.coding_v2_importing = False
+            self.coding_v2_progress.pack_forget()
+            self.retry_button.configure(state="normal")
+            self.update_button.configure(state="normal")
+            if payload.get("success"):
+                self.coding_v2_status.configure(text=f"Installed. Choose {CODING_V2_MODEL} in the model list to try it.")
+                self._update_model_controls()
+                self.connect()
+            else:
+                description = "Installation cancelled. Your current model was kept." if payload.get("cancelled") else str(payload.get("error", "Installation failed."))
+                self.coding_v2_status.configure(text=description)
+                self.status_label.configure(text=description)
+                if not payload.get("cancelled"):
+                    self._append("Coding v2 installation: " + description + "\n", "error")
+                self._update_model_controls()
+        elif event == "attachments_prepared":
             if payload.get("epoch") != self.attachment_epoch:
                 return
             self.attachment_jobs = max(0, self.attachment_jobs - 1)
@@ -1753,6 +1861,7 @@ class LocalAgentApp:
         for callback_id in (self._poll_id, self._tick_id):
             self.root.after_cancel(callback_id)
         self.cancel.set()
+        self.coding_v2_cancel.set()
         self._answer_approval(False)
         self._answer_question(None)
         self._drain_incoming()
@@ -1769,6 +1878,10 @@ class LocalAgentApp:
         self._wait_for_close()
 
     def _wait_for_close(self):
+        if self.coding_v2_worker is not None and self.coding_v2_worker.is_alive():
+            self.status_label.configure(text="Finishing the model installer's cleanup and saving your chat…")
+            self.root.after(100, self._wait_for_close)
+            return
         # Let the agent cancel HTTP reads and kill any running command's process
         # tree before ending Python; its worker is deliberately a daemon.
         if self.worker is not None and self.worker.is_alive() and time.monotonic() - self._close_started < 15:
