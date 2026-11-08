@@ -864,7 +864,7 @@ class LocalAgentApp:
         self.coding_v2_progress.pack(fill="x", pady=(5, 0))
         self.retry_button.configure(state="disabled")
         self.update_button.configure(state="disabled")
-        self.status_label.configure(text="Installing coding v2. Your current model will remain selected.")
+        self.status_label.configure(text="Installing experimental coding v2. Choose it from the model list when ready.")
         self._update_model_controls()
 
         def worker():
@@ -1603,7 +1603,7 @@ class LocalAgentApp:
                 self._update_model_controls()
                 self.connect()
             else:
-                description = "Installation cancelled. Your current model was kept." if payload.get("cancelled") else str(payload.get("error", "Installation failed."))
+                description = "Installation cancelled." if payload.get("cancelled") else str(payload.get("error", "Installation failed."))
                 self.coding_v2_status.configure(text=description)
                 self.status_label.configure(text=description)
                 if not payload.get("cancelled"):
