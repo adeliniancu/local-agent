@@ -318,17 +318,28 @@ def _gguf_from_line(source: Path) -> str:
     return f'FROM "{source.as_posix()}"'
 
 
-def _create_local_model(model: str, modelfile: Path, *, progress=None) -> None:
+def _create_local_model(model: str, modelfile: Path, *, progress=None, timeout=None) -> None:
     env = os.environ.copy()
     env.update(OLLAMA_HOST=f"127.0.0.1:{PORT}", OLLAMA_MODELS=str(ROOT / "models"), OLLAMA_NO_CLOUD="1")
-    process = subprocess.Popen([str(OLLAMA), "create", model, "--file", str(modelfile)], env=env,
-                               cwd=modelfile.parent, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    command = [str(OLLAMA), "create", model, "--file", str(modelfile)]
+    options = dict(env=env, cwd=modelfile.parent, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                   stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+    if timeout is not None:
+        try:
+            result = subprocess.run(command, timeout=timeout, **options)
+        except subprocess.TimeoutExpired as exc:
+            raise RuntimeError("Model registration timed out. Refresh the model list before retrying.") from exc
+        if result.returncode:
+            raise RuntimeError("Model import failed: " + ansi.sub("", result.stdout).strip()[-2000:])
+        return
+
+    process = subprocess.Popen(command, **options)
     lines = []
     try:
         for line in process.stdout:
-            text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip()
+            text = ansi.sub("", line).strip()
             if text:
                 lines = (lines + [text])[-8:]
                 if progress is not None:
@@ -461,7 +472,7 @@ def install_coding_v2(*, progress=None, cancel_event=None) -> None:
         check_cancel()
         if progress is not None:
             progress({"kind": "importing", "text": "Registering the verified model with local Ollama…"})
-        _create_local_model(CODING_V2_MODEL, modelfile)
+        _create_local_model(CODING_V2_MODEL, modelfile, timeout=900)
         if CODING_V2_MODEL not in list_models():
             raise RuntimeError("The local engine did not confirm the installed model.")
     _model_info.cache_clear()

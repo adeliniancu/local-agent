@@ -4,6 +4,7 @@ import io
 import json
 import os
 from pathlib import Path
+import subprocess
 import tempfile
 import threading
 import unittest
@@ -208,7 +209,7 @@ class CodingPackageTests(unittest.TestCase):
         self.enterContext(patch.object(runtime, "list_models", side_effect=lambda: list(self.models)))
         self.enterContext(patch.object(runtime.shutil, "disk_usage", return_value=Mock(free=9 * 1024**3)))
         self.enterContext(patch.object(runtime.urllib.request, "build_opener", return_value=self.opener))
-        self.create = self.enterContext(patch.object(runtime.subprocess, "Popen"))
+        self.create = self.enterContext(patch.object(runtime.subprocess, "run"))
 
     def file_spec(self, name, *assets):
         parts = tuple((asset, len(self.assets[asset]), hashlib.sha256(self.assets[asset]).hexdigest()) for asset in assets)
@@ -230,6 +231,7 @@ class CodingPackageTests(unittest.TestCase):
         def register(args, **kwargs):
             self.assertEqual(["create", runtime.CODING_V2_MODEL, "--file"], args[1:4])
             self.assertEqual(f"127.0.0.1:{runtime.PORT}", kwargs["env"]["OLLAMA_HOST"])
+            self.assertGreater(kwargs["timeout"], 0)
             modelfile = Path(args[-1])
             self.assertEqual((modelfile.parent / "model.gguf").read_bytes(), b"GGUF-language-weights")
             text = modelfile.read_text(encoding="utf-8")
@@ -238,7 +240,7 @@ class CodingPackageTests(unittest.TestCase):
             self.assertIn("RENDERER qwen3.5\nPARSER qwen3.5", text)
             self.assertIn('LICENSE """', text)
             self.models.append(runtime.CODING_V2_MODEL)
-            return Mock(stdout=io.StringIO("success\n"), wait=Mock(return_value=0), poll=Mock(return_value=0))
+            return Mock(stdout="success\n", returncode=0)
 
         self.create.side_effect = register
         events = []
@@ -272,6 +274,14 @@ class CodingPackageTests(unittest.TestCase):
             runtime.install_coding_v2(progress=progress, cancel_event=cancelled)
         self.create.assert_not_called()
         self.assertEqual(1, self.opener.open.call_count)
+        self.assertFalse(list(self.data.glob("coding-v2-*")))
+
+    def test_registration_timeout_cleans_verified_download_and_reports_error(self):
+        self.create.side_effect = subprocess.TimeoutExpired("ollama create", 900)
+        events = []
+        with self.assertRaisesRegex(RuntimeError, "registration timed out"):
+            runtime.install_coding_v2(progress=events.append)
+        self.assertEqual("importing", events[-1]["kind"])
         self.assertFalse(list(self.data.glob("coding-v2-*")))
 
 
