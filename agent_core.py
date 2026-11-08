@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import queue
 import re
+import shlex
 import socket
 import subprocess
 import sys
@@ -119,7 +120,7 @@ class Agent:
         self._denied = False
         self._unanswered = False
         self._stuck = False
-        self._command_failures: dict[str, int] = {}
+        self._command_failures: dict[tuple[str, str], int] = {}
         self._file_versions: dict[Path, dict] = {}
         self._launched_apps = {}
         self._progress_reads = {}
@@ -454,24 +455,95 @@ class Agent:
         if not re.search(r"-m\s+pip\s+install\b", command, re.I):
             raise ValueError("Use python -m pip install so pip belongs to the same interpreter that will run the project.")
 
-    def _record_command_result(self, result: dict):
+    @staticmethod
+    def _command_tokens(command):
+        try:
+            return [token.strip("\"'") for token in shlex.split(command, posix=False)]
+        except ValueError:
+            return []
+
+    def _command_repair_scope(self, output, tokens, *, python_diagnostic=False, source_path=None):
+        """Read only named source files and installed-package metadata, never logs/caches."""
+        candidates = re.findall(r'^\s*File "([^"\r\n]+)", line \d+', output, re.M)
+        candidates += [token.rstrip(";") for token in tokens if token.rstrip(";").lower().endswith(".py")]
+        if source_path is not None:
+            candidates.append(str(source_path))
+        revisions = []
+        for candidate in sorted(set(candidates)):
+            try:
+                path = self._path(candidate)
+                relative = path.relative_to(self.workspace)
+                if any(part in {BACKUP_DIR, ".localagent-runs", "__pycache__"} for part in relative.parts):
+                    continue
+                with path.open("rb") as handle:
+                    content = handle.read(MAX_FILE_BYTES + 1)
+                if len(content) <= MAX_FILE_BYTES:
+                    revision = hashlib.sha256(content).hexdigest()
+                else:
+                    stat = path.stat()
+                    revision = f"large:{stat.st_size}:{stat.st_mtime_ns}"
+                revisions.append((str(relative), revision))
+            except (OSError, ValueError):
+                continue
+        if python_diagnostic:
+            # pip list/help/import diagnostics do not change these entries.
+            # An install, upgrade, reinstall or new project environment does.
+            environment = self.workspace / ".venv"
+            if not (environment / "Scripts/python.exe").is_file():
+                environment = APP_ROOT / "runtime/python"
+            packages = environment / "Lib/site-packages"
+            metadata = []
+            try:
+                for entry in packages.iterdir():
+                    if entry.name.endswith((".dist-info", ".egg-info")):
+                        target = entry / "METADATA" if entry.is_dir() else entry
+                        if not target.is_file() and entry.is_dir():
+                            target = entry / "PKG-INFO"
+                        stat = target.stat() if target.exists() else entry.stat()
+                        metadata.append((entry.name, stat.st_size, stat.st_mtime_ns))
+            except OSError:
+                pass
+            revisions.append(("python_environment", str(environment.resolve()), sorted(metadata)))
+        return revisions
+
+    def _record_command_result(self, result: dict, command: str = "", *, source_path=None):
+        output = str(result.get("output") or "")
+        lines = output.strip().splitlines()
+        tokens = self._command_tokens(command)
+        # Anchor exception lines: help text such as ':raises ValueError:' is not
+        # a raised exception. A shared unittest 'ERROR: test' footer is not the
+        # condition when a more precise exception is available.
+        exceptions = list(dict.fromkeys(line.strip() for line in lines if re.match(
+            r"^[A-Za-z_][\w.]*(?:Error|Exception):(?:\s|$)", line.strip())))
+        python_execution = source_path is not None or any(
+            re.search(r"(?:^|[\\/])(?:python(?:w|\d+(?:\.\d+)*)?|py)(?:\.exe)?$", token, re.I)
+            for token in tokens)
+        traceback = bool(re.search(r"^\s*Traceback \(most recent call last\):\s*$", output, re.M))
         if result.get("exit_code") == 0 and not result.get("error"):
-            self._command_failures.clear()
-            return
-        lines = str(result.get("output") or result.get("error") or "Command failed").strip().splitlines()
-        diagnostics = [line.strip() for line in lines if re.search(
-            r"(?:Error|Exception):|^(?:FAIL|ERROR):|^E\s+", line)]
-        # Test suites often end with the same 'FAILED (errors=1)' footer even
-        # after the previous bug was fixed. Compare the actual diagnostics.
-        evidence = "\n".join(diagnostics[-8:]) if diagnostics else (lines[-1] if lines else "Command failed")
-        fingerprint = hashlib.sha256(evidence.encode("utf-8")).hexdigest()
-        count = self._command_failures.get(fingerprint, 0) + 1
-        self._command_failures[fingerprint] = count
-        if count >= 2:
-            result["recovery_hint"] = "This error has repeated. Inspect the actual diagnostic and change the code or approach before running the same check again."
-        if count >= 3:
+            if python_execution and traceback and exceptions:
+                result["error"] = "Python reported a traceback despite exit code 0. Inspect the callback/thread failure; this is not a clean verification."
+            else:
+                # Only a clean result from this exact check resolves its counts.
+                # Listing files or printing help must not erase another failure.
+                for key in [key for key in self._command_failures if key[0] == command.strip()]:
+                    del self._command_failures[key]
+                return
+        diagnostics = exceptions or list(dict.fromkeys(line.strip() for line in lines if re.match(r"^(?:FAIL|ERROR):|^E\s+", line.strip())))
+        if not diagnostics:
+            diagnostics = [str(result.get("error") or (lines[-1] if lines else "Command failed"))]
+        scope = self._command_repair_scope(output, tokens, python_diagnostic=bool(exceptions), source_path=source_path)
+        highest = 0
+        for evidence in diagnostics[-8:]:
+            fingerprint = hashlib.sha256(json.dumps([evidence, scope], ensure_ascii=False).encode("utf-8")).hexdigest()
+            key = (command.strip(), fingerprint)
+            count = self._command_failures.get(key, 0) + 1
+            self._command_failures[key] = count
+            highest = max(highest, count)
+        if highest >= 2:
+            result["recovery_hint"] = "This check repeated the same diagnostic on unchanged source/dependencies. Repair the relevant code or dependency before retrying; unrelated successful diagnostics do not resolve it."
+        if highest >= 3:
             self._stuck = True
-            result["paused"] = "The same command error occurred three times. Ask the user for direction before continuing."
+            result["paused"] = "The same command error occurred three times on unchanged source/dependencies. Ask the user for direction before continuing."
 
     def _run_command(self, command: str, timeout_seconds=90):
         if not isinstance(command, str) or not command.strip():
@@ -512,7 +584,7 @@ class Agent:
             result = {"exit_code": process.returncode, "output": self._clip(content)}
             if reason:
                 result["error"] = reason
-            self._record_command_result(result)
+            self._record_command_result(result, command)
             return result
 
     def _launch_python_app(self, path):
@@ -551,7 +623,7 @@ class Agent:
                   "log": str(log.relative_to(self.workspace)), "output": text,
                   "note": "Process started; window behavior still needs verification. Do not launch a duplicate."}
         self._launched_apps[script] = (process, result)
-        self._record_command_result(result) if code is not None else None
+        self._record_command_result(result, f'python "{script}"', source_path=script) if code is not None else None
         return result
 
     def _ask_user(self, question: str, options: list[str] | None = None):
