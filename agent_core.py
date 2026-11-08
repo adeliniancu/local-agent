@@ -473,6 +473,8 @@ class Agent:
             try:
                 path = self._path(candidate)
                 relative = path.relative_to(self.workspace)
+                if not path.is_file() or path.suffix.lower() not in {".py", ".pyw"}:
+                    continue
                 if any(part in {BACKUP_DIR, ".localagent-runs", "__pycache__"} for part in relative.parts):
                     continue
                 with path.open("rb") as handle:
@@ -489,16 +491,20 @@ class Agent:
             # pip list/help/import diagnostics do not change these entries.
             # An install, upgrade, reinstall or new project environment does.
             environment = self.workspace / ".venv"
-            if not (environment / "Scripts/python.exe").is_file():
+            if not environment.resolve().is_relative_to(self.workspace) or not (environment / "Scripts/python.exe").is_file():
                 environment = APP_ROOT / "runtime/python"
             packages = environment / "Lib/site-packages"
             metadata = []
             try:
+                if not packages.resolve().is_relative_to(environment.resolve()):
+                    raise OSError("Package directory is outside its Python environment.")
                 for entry in packages.iterdir():
                     if entry.name.endswith((".dist-info", ".egg-info")):
                         target = entry / "METADATA" if entry.is_dir() else entry
                         if not target.is_file() and entry.is_dir():
                             target = entry / "PKG-INFO"
+                        if not target.resolve().is_relative_to(environment.resolve()):
+                            continue
                         stat = target.stat() if target.exists() else entry.stat()
                         metadata.append((entry.name, stat.st_size, stat.st_mtime_ns))
             except OSError:
@@ -514,13 +520,15 @@ class Agent:
         # a raised exception. A shared unittest 'ERROR: test' footer is not the
         # condition when a more precise exception is available.
         exceptions = list(dict.fromkeys(line.strip() for line in lines if re.match(
-            r"^[A-Za-z_][\w.]*(?:Error|Exception):(?:\s|$)", line.strip())))
+            r"^(?:[\w.]*Error|[\w.]*Exception):(?:\s|$)", line.strip())))
         python_execution = source_path is not None or any(
             re.search(r"(?:^|[\\/])(?:python(?:w|\d+(?:\.\d+)*)?|py)(?:\.exe)?$", token, re.I)
             for token in tokens)
-        traceback = bool(re.search(r"^\s*Traceback \(most recent call last\):\s*$", output, re.M))
+        callback_traceback = bool(re.search(
+            r"^(?:Exception in Tkinter callback|Exception in thread [^\r\n]+:)\r?\n"
+            r"Traceback \(most recent call last\):\s*$", output, re.M))
         if result.get("exit_code") == 0 and not result.get("error"):
-            if python_execution and traceback and exceptions:
+            if python_execution and callback_traceback and exceptions:
                 result["error"] = "Python reported a traceback despite exit code 0. Inspect the callback/thread failure; this is not a clean verification."
             else:
                 # Only a clean result from this exact check resolves its counts.
