@@ -1,9 +1,11 @@
 """Local model and performance helpers; all network/import operations are mocked."""
+import hashlib
 import io
 import json
 import os
 from pathlib import Path
 import tempfile
+import threading
 import unittest
 from unittest.mock import Mock, patch
 
@@ -179,6 +181,98 @@ class ImportTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "unsupported architecture"):
                 runtime.import_gguf("my-model", self.source)
         self.assertEqual([], list((self.root / "data").iterdir()))
+
+
+class CodingPackageTests(unittest.TestCase):
+    def setUp(self):
+        temporary = self.enterContext(tempfile.TemporaryDirectory(prefix="coding-v2-test-"))
+        self.root = Path(temporary).resolve()
+        self.data = self.root / "data"
+        self.data.mkdir()
+        (self.data / "settings.json").write_text('{"model": "original:4b"}', encoding="utf-8")
+        notices = self.root / "Third Party Notices"
+        notices.mkdir()
+        license_name = "QWEN3.5-APACHE-2.0-LICENSE.txt"
+        bundled_license = (runtime.ROOT / "distribution-notices" / license_name).read_bytes()
+        (notices / license_name).write_bytes(bundled_license)
+        self.assets = {"language.part01": b"GGUF-language-", "language.part02": b"weights", "projector.gguf": b"GGUF-projector"}
+        self.files = (self.file_spec("model.gguf", "language.part01", "language.part02"),
+                      self.file_spec("mmproj.gguf", "projector.gguf"))
+        self.models = ["original:4b"]
+        self.opener = Mock(open=Mock(side_effect=self.response))
+        self.enterContext(patch.object(runtime, "ROOT", self.root))
+        self.enterContext(patch.object(runtime, "_CODING_V2_FILES", self.files))
+        self.total = sum(item[1] for item in self.files)
+        self.enterContext(patch.object(runtime, "CODING_V2_DOWNLOAD_BYTES", self.total))
+        self.enterContext(patch.object(runtime, "ensure_server"))
+        self.enterContext(patch.object(runtime, "list_models", side_effect=lambda: list(self.models)))
+        self.enterContext(patch.object(runtime.shutil, "disk_usage", return_value=Mock(free=9 * 1024**3)))
+        self.enterContext(patch.object(runtime.urllib.request, "build_opener", return_value=self.opener))
+        self.create = self.enterContext(patch.object(runtime.subprocess, "Popen"))
+
+    def file_spec(self, name, *assets):
+        parts = tuple((asset, len(self.assets[asset]), hashlib.sha256(self.assets[asset]).hexdigest()) for asset in assets)
+        assembled = b"".join(self.assets[asset] for asset in assets)
+        return (name, len(assembled), hashlib.sha256(assembled).hexdigest(), parts)
+
+    def response(self, request, timeout):
+        self.assertTrue(request.full_url.startswith(runtime._CODING_V2_RELEASE))
+        data = self.assets[request.full_url.removeprefix(runtime._CODING_V2_RELEASE)]
+        response = io.BytesIO(data)
+        response.headers = {"Content-Length": str(len(data))}
+        return response
+
+    def test_verified_parts_register_exact_tag_with_cached_projector(self):
+        cached = self.root / "models" / "blobs" / ("sha256-" + self.files[1][2])
+        cached.parent.mkdir(parents=True)
+        cached.write_bytes(self.assets["projector.gguf"])
+
+        def register(args, **kwargs):
+            self.assertEqual(["create", runtime.CODING_V2_MODEL, "--file"], args[1:4])
+            self.assertEqual(f"127.0.0.1:{runtime.PORT}", kwargs["env"]["OLLAMA_HOST"])
+            modelfile = Path(args[-1])
+            self.assertEqual((modelfile.parent / "model.gguf").read_bytes(), b"GGUF-language-weights")
+            text = modelfile.read_text(encoding="utf-8")
+            self.assertEqual(2, text.count('FROM "'))
+            self.assertIn(f'FROM "{cached.as_posix()}"', text)
+            self.assertIn("RENDERER qwen3.5\nPARSER qwen3.5", text)
+            self.assertIn('LICENSE """', text)
+            self.models.append(runtime.CODING_V2_MODEL)
+            return Mock(stdout=io.StringIO("success\n"), wait=Mock(return_value=0), poll=Mock(return_value=0))
+
+        self.create.side_effect = register
+        events = []
+        runtime.install_coding_v2(progress=events.append)
+        self.assertEqual(2, self.opener.open.call_count)
+        self.assertIn({"kind": "progress", "done": self.total, "total": self.total}, events)
+        self.assertEqual(["importing", "success"], [event["kind"] for event in events[-2:]])
+        self.assertEqual(["original:4b", runtime.CODING_V2_MODEL], self.models)
+        self.assertEqual('{"model": "original:4b"}', (self.data / "settings.json").read_text(encoding="utf-8"))
+        self.assertFalse(list(self.data.glob("coding-v2-*")))
+        self.opener.reset_mock()
+        with self.assertRaisesRegex(RuntimeError, "already installed"):
+            runtime.install_coding_v2()
+        self.opener.open.assert_not_called()
+
+    def test_bad_part_hash_stops_before_registration_and_cleans_download(self):
+        self.assets["language.part01"] = b"GGUF-language?"
+        with self.assertRaisesRegex(RuntimeError, "failed verification"):
+            runtime.install_coding_v2()
+        self.create.assert_not_called()
+        self.assertFalse(list(self.data.glob("coding-v2-*")))
+
+    def test_cancel_during_download_stops_before_registration_and_cleans_download(self):
+        cancelled = threading.Event()
+
+        def progress(event):
+            if event["kind"] == "progress":
+                cancelled.set()
+
+        with self.assertRaisesRegex(InterruptedError, "cancelled"):
+            runtime.install_coding_v2(progress=progress, cancel_event=cancelled)
+        self.create.assert_not_called()
+        self.assertEqual(1, self.opener.open.call_count)
+        self.assertFalse(list(self.data.glob("coding-v2-*")))
 
 
 if __name__ == "__main__":
