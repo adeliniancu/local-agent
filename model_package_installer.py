@@ -1,4 +1,4 @@
-"""Install an explicitly selected, verified model package into Local Agent."""
+"""Install the explicitly selected experimental model into an existing Local Agent."""
 from __future__ import annotations
 
 import argparse
@@ -21,13 +21,8 @@ import urllib.parse
 import urllib.request
 
 MODEL = "qwen3.5:4b-local-agent-trained"
-CODING_V2_MODEL = "qwen3.5:4b-coding-v2"
 RELEASE_PREFIX = "https://github.com/adeliniancu/local-agent/releases/download/v2.0.100/"
 PARAMETERS = {"top_p": 0.95, "presence_penalty": 1.5, "temperature": 1, "top_k": 20}
-CODING_V2_PARTS = {
-    "model.gguf": ("local-agent-4b-coding-v2-model.part01", "local-agent-4b-coding-v2-model.part02"),
-    "mmproj.gguf": ("local-agent-4b-pilot1-projector.gguf",),
-}
 MAX_BYTES = 8 * 1024**3
 MIN_FREE_BYTES = 8 * 1024**3
 
@@ -60,9 +55,8 @@ def validate_manifest(value):
     required = {"schema", "model", "label", "files", "parameters", "renderer", "parser", "license_file", "quality", "experimental"}
     if not isinstance(value, dict) or not required <= value.keys():
         raise InstallError("Incomplete model manifest")
-    model = value["model"]
-    if type(value["schema"]) is not int or value["schema"] != 1 or model not in (MODEL, CODING_V2_MODEL) or value["experimental"] is not True:
-        raise InstallError("This installer supports only the published experimental 4B model packages")
+    if type(value["schema"]) is not int or value["schema"] != 1 or value["model"] != MODEL or value["experimental"] is not True:
+        raise InstallError("This installer supports only the experimental trained 4B pilot")
     if value["renderer"] != "qwen3.5" or value["parser"] != "qwen3.5" or value["license_file"] != "LICENSE.txt":
         raise InstallError("Unexpected model format")
     if (not isinstance(value["label"], str) or len(value["label"]) > 150
@@ -73,14 +67,9 @@ def validate_manifest(value):
             or any(type(v) not in (int, float) or not math.isfinite(v) for v in params.values())):
         raise InstallError("Unexpected model parameters")
     quality = value["quality"]
-    if (not isinstance(quality, dict) or quality.keys() != {"trained_passed", "reference_passed", "tasks"}
+    if (not isinstance(quality, dict) or quality != {"trained_passed": 1, "reference_passed": 2, "tasks": 3}
             or any(type(v) is not int for v in quality.values())):
         raise InstallError("Missing experimental quality disclosure")
-    if model == MODEL and quality != {"trained_passed": 1, "reference_passed": 2, "tasks": 3}:
-        raise InstallError("Unexpected pilot benchmark results")
-    if model == CODING_V2_MODEL and (quality["tasks"] != 12
-            or not 0 <= quality["trained_passed"] <= 12 or not 0 <= quality["reference_passed"] <= 12):
-        raise InstallError("Invalid Coding V2 benchmark results")
     files = value["files"]
     if not isinstance(files, list) or len(files) != 2 or {f.get("name") for f in files if isinstance(f, dict)} != {"model.gguf", "mmproj.gguf"}:
         raise InstallError("Model package must contain a language model and image projector")
@@ -101,8 +90,6 @@ def validate_manifest(value):
             assets.add(name)
             if type(part.get("size")) is not int or not 1 <= part["size"] < 2 * 1024**3 or not digest_ok(part.get("sha256")):
                 raise InstallError("Invalid download part size or checksum")
-        if model == CODING_V2_MODEL and tuple(part["name"] for part in parts) != CODING_V2_PARTS[item["name"]]:
-            raise InstallError("Unexpected Coding V2 download parts")
         if sum(part["size"] for part in parts) != item["size"]:
             raise InstallError("Parts do not add up to the model file size")
     if sum(item["size"] for item in files) > MAX_BYTES:
@@ -253,12 +240,10 @@ def owned_engine(app_dir, runtime, cancel):
 
 
 def install_model(app_dir, manifest, license_path, cancel, notify, *, runtime_module=None, opener=open_download):
-    """Verify and register a local model, reporting status through the supplied callback."""
     app_dir, manifest = validate_app(app_dir), validate_manifest(manifest)
     license_text = Path(license_path).read_text(encoding="utf-8")
     if not license_text.strip() or len(license_text.encode()) > 65536 or '"""' in license_text:
         raise InstallError("Missing or invalid model license")
-    check_cancel(cancel)
     runtime = runtime_module or app_runtime(app_dir)
     notify("status", "Starting a private local engine for the selected app folder…")
     with nullcontext() if runtime_module is not None else owned_engine(app_dir, runtime, cancel):
@@ -266,9 +251,8 @@ def install_model(app_dir, manifest, license_path, cancel, notify, *, runtime_mo
 
 
 def _install_to_engine(app_dir, manifest, license_text, cancel, notify, runtime, opener):
-    model = manifest["model"]
-    if model in runtime.list_models():
-        raise InstallError(f"{model} is already installed. Refresh the model list to select it.")
+    if MODEL in runtime.list_models():
+        raise InstallError("The trained pilot is already installed. Click Refresh in Local Agent and select it.")
     engine = runtime._get("/api/version").get("version", "")
     match = re.match(r"^(\d+)\.(\d+)\.(\d+)", engine)
     if not match or tuple(map(int, match.groups())) < (0, 30, 0):
@@ -277,15 +261,14 @@ def _install_to_engine(app_dir, manifest, license_text, cancel, notify, runtime,
         raise InstallError("Allow at least 8 GB of free disk space for download and installation.")
     data = app_dir / "data"
     data.mkdir(exist_ok=True)
-    download_gb = sum(item["size"] for item in manifest["files"]) / 1_000_000_000
-    notify("status", f"Downloading and verifying model files (up to {download_gb:.1f} GB)…")
+    notify("status", "Downloading and verifying model files (up to 3.4 GB)…")
     with tempfile.TemporaryDirectory(prefix="trained-model-", dir=data) as temporary:
         folder = Path(temporary).resolve()
         if not folder.is_relative_to(data.resolve()):
             raise InstallError("Temporary model folder left application storage")
         paths = download_files(manifest, folder, app_dir, cancel, lambda a, b: notify("progress", (a, b)), opener=opener)
         check_cancel(cancel)
-        if model in runtime.list_models():
+        if MODEL in runtime.list_models():
             raise InstallError("This model was installed by another window; nothing was overwritten.")
         lines = [f'FROM "{paths[name].as_posix()}"' for name in ("model.gguf", "mmproj.gguf")]
         lines += ["TEMPLATE {{ .Prompt }}", "RENDERER qwen3.5", "PARSER qwen3.5"]
@@ -293,17 +276,16 @@ def _install_to_engine(app_dir, manifest, license_text, cancel, notify, runtime,
         lines += ['LICENSE """' + license_text + '"""']
         modelfile = folder / "Modelfile"
         modelfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        check_cancel(cancel)
         notify("importing", "Registering the verified model. Please wait until this finishes…")
-        process = subprocess.run([str(app_dir / "runtime/ollama/ollama.exe"), "create", model, "-f", str(modelfile)],
+        process = subprocess.run([str(app_dir / "runtime/ollama/ollama.exe"), "create", MODEL, "-f", str(modelfile)],
             cwd=folder, env=engine_environment(app_dir, runtime.PORT), stdin=subprocess.DEVNULL, capture_output=True, text=True,
             encoding="utf-8", errors="replace", timeout=900, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         if process.returncode:
             detail = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", process.stdout + process.stderr)[-1200:]
             raise InstallError("Model registration failed: " + detail)
-        if model not in runtime.list_models():
+        if MODEL not in runtime.list_models():
             raise InstallError("The engine did not confirm the new model")
-    notify("success", f"Installed {model}. Refresh the model list to select it.")
+    notify("success", "Installed. In Local Agent click Refresh, then choose " + MODEL + ". Your original model and chats were kept.")
 
 
 def main():
@@ -313,24 +295,14 @@ def main():
     parser.add_argument("--app-dir", type=Path, required=True)
     parser.add_argument("--manifest", type=Path, default=Path(__file__).with_name("model-manifest.json"))
     args = parser.parse_args()
-    try:
-        manifest = load_manifest(args.manifest)
-    except (InstallError, OSError, ValueError) as error:
-        parser.error(str(error))
     window = tk.Tk()
     window.title("Install experimental Local Agent model")
     window.geometry("680x440")
     window.minsize(650, 400)
     frame = ttk.Frame(window, padding=24)
     frame.pack(fill="both", expand=True)
-    ttk.Label(frame, text=manifest["label"], font=("Segoe UI", 17, "bold")).pack(anchor="w")
-    quality = manifest["quality"]
-    tasks = quality["tasks"]
-    download_gb = sum(item["size"] for item in manifest["files"]) / 1_000_000_000
-    explanation = ttk.Label(frame, text=(
-        f"The experimental model passed {quality['trained_passed']} of {tasks} coding tasks. "
-        f"The matching untrained reference passed {quality['reference_passed']} of {tasks}.\n\n"
-        f"Downloads up to {download_gb:.1f} GB. Allow 8 GB of free disk space."), wraplength=625)
+    ttk.Label(frame, text="Experimental trained 4B pilot", font=("Segoe UI", 17, "bold")).pack(anchor="w")
+    explanation = ttk.Label(frame, text="This pilot passed 1 of 3 coding tasks; the untrained reference passed 2 of 3.\nIt is not a demonstrated improvement. Your original model stays available.\n\nDownloads up to 3.4 GB. Allow 8 GB of free disk space.\nNo Codex account, API key or payment is needed by this installer.", wraplength=625)
     explanation.pack(anchor="w", pady=(12, 14))
     status = tk.StringVar(value="Choose Install to download this optional model.")
     status_label = ttk.Label(frame, textvariable=status, wraplength=625)
@@ -355,6 +327,7 @@ def main():
         install.configure(state="disabled")
         def worker():
             try:
+                manifest = load_manifest(args.manifest)
                 install_model(args.app_dir, manifest, args.manifest.with_name("LICENSE.txt"), cancel,
                               lambda kind, payload: events.put((kind, payload)))
             except Exception as error:
