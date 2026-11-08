@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import base64
 import hashlib
@@ -39,6 +40,7 @@ def _local_port(value: str | None = None) -> int:
 PORT = _local_port()
 BASE_URL = f"http://127.0.0.1:{PORT}"
 MODEL = "qwen3.5:4b-q4_K_M"
+CODING_V2_MODEL = "qwen3.5:4b-coding-v2"
 OLLAMA = ROOT / "runtime" / "ollama" / "ollama.exe"
 _start_lock = threading.Lock()
 PERFORMANCE_PROFILES = {
@@ -294,8 +296,7 @@ def import_gguf(model: str, path: str | Path, *, progress=None) -> None:
     with source.open("rb") as stream:
         if stream.read(4) != b"GGUF":
             raise ValueError("The selected file does not have a GGUF header.")
-    if any(character in str(source) for character in ('"', "\r", "\n")):
-        raise ValueError("The model path contains unsupported quote or newline characters.")
+    from_line = _gguf_from_line(source)
     ensure_server()
     existing = set(list_models())
     canonical = model if ":" in model else model + ":latest"
@@ -303,32 +304,169 @@ def import_gguf(model: str, path: str | Path, *, progress=None) -> None:
         raise ValueError("That model name already exists. Choose a new import name.")
     data = ROOT / "data"
     data.mkdir(exist_ok=True)
-    env = os.environ.copy()
-    env.update(OLLAMA_HOST=f"127.0.0.1:{PORT}", OLLAMA_MODELS=str(ROOT / "models"), OLLAMA_NO_CLOUD="1")
     with tempfile.TemporaryDirectory(prefix="model-import-", dir=data) as temporary:
         modelfile = Path(temporary) / "Modelfile"
-        modelfile.write_text(f'FROM "{source.as_posix()}"\n', encoding="utf-8")
-        process = subprocess.Popen([str(OLLAMA), "create", model, "--file", str(modelfile)], env=env,
-                                   cwd=temporary, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                                   stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
-                                   creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-        lines = []
-        try:
-            for line in process.stdout:
-                text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip()
-                if text:
-                    lines = (lines + [text])[-8:]
-                    if progress is not None:
-                        progress({"status": text})
-            if process.wait() != 0:
-                raise RuntimeError("Model import failed: " + "\n".join(lines)[-2000:])
-        finally:
-            process.stdout.close()
-            if process.poll() is None:
-                process.terminate()
-                process.wait(timeout=10)
+        modelfile.write_text(from_line + "\n", encoding="utf-8")
+        _create_local_model(model, modelfile, progress=progress)
     _model_info.cache_clear()
     get_model_info(model)
+
+
+def _gguf_from_line(source: Path) -> str:
+    if any(character in str(source) for character in ('"', "\r", "\n")):
+        raise ValueError("The model path contains unsupported quote or newline characters.")
+    return f'FROM "{source.as_posix()}"'
+
+
+def _create_local_model(model: str, modelfile: Path, *, progress=None) -> None:
+    env = os.environ.copy()
+    env.update(OLLAMA_HOST=f"127.0.0.1:{PORT}", OLLAMA_MODELS=str(ROOT / "models"), OLLAMA_NO_CLOUD="1")
+    process = subprocess.Popen([str(OLLAMA), "create", model, "--file", str(modelfile)], env=env,
+                               cwd=modelfile.parent, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                               creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    lines = []
+    try:
+        for line in process.stdout:
+            text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", line).strip()
+            if text:
+                lines = (lines + [text])[-8:]
+                if progress is not None:
+                    progress({"status": text})
+        if process.wait() != 0:
+            raise RuntimeError("Model import failed: " + "\n".join(lines)[-2000:])
+    finally:
+        process.stdout.close()
+        if process.poll() is None:
+            process.terminate()
+            process.wait(timeout=10)
+
+
+# Keep this metadata in runtime.py so older app versions can receive it through
+# the existing update-file allowlist. Entries pin both each asset and each GGUF.
+_CODING_V2_RELEASE = "https://github.com/adeliniancu/local-agent/releases/download/v2.0.100/"
+_CODING_V2_FILES = (
+    ("model.gguf", 2_708_804_128, "ddd95382a9f3a90e381164066339aad59c6572609b394df199718ef4ea70f8bd", (
+        ("local-agent-4b-coding-v2-model.part01", 1_500_000_000, "6861a4f18d403a6f4f1acfb3bdbe201f3217349b4c68b76e4f60cb7bf501aa8d"),
+        ("local-agent-4b-coding-v2-model.part02", 1_208_804_128, "341522ff1ca2f2da0ba457a46d61ce71dc71ae98cf6677cc5ce1edc8add26825"),
+    )),
+    ("mmproj.gguf", 675_569_120, "e56a899b1540860385465756dd308c84417410b94dbc1c380adffd20a921ca60", (
+        ("local-agent-4b-pilot1-projector.gguf", 675_569_120, "e56a899b1540860385465756dd308c84417410b94dbc1c380adffd20a921ca60"),
+    )),
+)
+CODING_V2_DOWNLOAD_BYTES = sum(item[1] for item in _CODING_V2_FILES)
+_CODING_V2_LICENSE_NAME = "QWEN3.5-APACHE-2.0-LICENSE.txt"
+_CODING_V2_LICENSE_SHA = "50cbab8a892c5f2993b8c7351a99182507472def3b1374558308605d99b86b32"
+
+
+class _ModelReleaseRedirects(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, request, fp, code, message, headers, url):
+        target = urllib.parse.urlsplit(url)
+        if (target.scheme != "https" or target.hostname not in {
+                "github.com", "release-assets.githubusercontent.com", "objects.githubusercontent.com"}
+                or target.username or target.password or target.fragment or target.port not in (None, 443)):
+            raise RuntimeError("The model download redirected to an untrusted address.")
+        return super().redirect_request(request, fp, code, message, headers, url)
+
+
+def _download_coding_gguf(item, directory, opener, advance, check_cancel) -> Path:
+    name, size, checksum, parts = item
+    cached = ROOT / "models" / "blobs" / f"sha256-{checksum}"
+    if cached.is_file() and not cached.is_symlink() and cached.stat().st_size == size:
+        digest = hashlib.sha256()
+        with cached.open("rb") as source:
+            while chunk := source.read(4 * 1024**2):
+                check_cancel()
+                digest.update(chunk)
+        if digest.hexdigest() == checksum:
+            advance(size)
+            return cached.resolve()
+
+    destination = directory / name
+    digest = hashlib.sha256()
+    with destination.open("xb") as output:
+        for asset, expected_size, expected_sha in parts:
+            check_cancel()
+            part_digest = hashlib.sha256()
+            received = 0
+            request = urllib.request.Request(_CODING_V2_RELEASE + asset, headers={"User-Agent": "Local-Agent"})
+            with opener.open(request, timeout=60) as source:
+                if source.headers.get("Content-Length") not in (None, str(expected_size)):
+                    raise RuntimeError("A model download part has the wrong size.")
+                while chunk := source.read(1024**2):
+                    check_cancel()
+                    received += len(chunk)
+                    if received > expected_size:
+                        raise RuntimeError("A model download part exceeded its expected size.")
+                    part_digest.update(chunk)
+                    digest.update(chunk)
+                    output.write(chunk)
+                    advance(len(chunk))
+            if received != expected_size or part_digest.hexdigest() != expected_sha:
+                raise RuntimeError("A model download part failed verification. Please retry.")
+    if destination.stat().st_size != size or digest.hexdigest() != checksum:
+        raise RuntimeError("The assembled model file failed verification.")
+    with destination.open("rb") as source:
+        if source.read(4) != b"GGUF":
+            raise RuntimeError("The verified model file has an invalid GGUF header.")
+    return destination
+
+
+def install_coding_v2(*, progress=None, cancel_event=None) -> None:
+    """Download the pinned local model and install it on the app's current engine."""
+    def check_cancel():
+        if cancel_event is not None and cancel_event.is_set():
+            raise InterruptedError("Model download cancelled.")
+
+    completed = 0
+
+    def advance(count):
+        nonlocal completed
+        completed += count
+        if progress is not None:
+            progress({"kind": "progress", "done": completed, "total": CODING_V2_DOWNLOAD_BYTES})
+
+    check_cancel()
+    ensure_server()
+    if CODING_V2_MODEL in list_models():
+        raise RuntimeError(f"{CODING_V2_MODEL} is already installed. Refresh the model list to select it.")
+    data = ROOT / "data"
+    if data.is_symlink() or data.is_junction() or not data.resolve().is_relative_to(ROOT.resolve()):
+        raise RuntimeError("The app's data folder must stay inside its installation folder.")
+    if shutil.disk_usage(ROOT).free < 8 * 1024**3:
+        raise RuntimeError("Allow at least 8 GB of free disk space to install Coding V2.")
+    license_path = ROOT / "Third Party Notices" / _CODING_V2_LICENSE_NAME
+    if not license_path.is_file():
+        license_path = ROOT / "distribution-notices" / _CODING_V2_LICENSE_NAME
+    license_text = license_path.read_text(encoding="utf-8")
+    if hashlib.sha256(license_text.encode("utf-8")).hexdigest() != _CODING_V2_LICENSE_SHA:
+        raise RuntimeError("The bundled Qwen3.5 license did not pass verification.")
+
+    data.mkdir(exist_ok=True)
+    check_cancel()
+    if progress is not None:
+        progress({"kind": "status", "text": "Downloading and verifying Coding V2 files…"})
+    opener = urllib.request.build_opener(_ModelReleaseRedirects())
+    with tempfile.TemporaryDirectory(prefix="coding-v2-", dir=data) as temporary:
+        folder = Path(temporary).resolve()
+        paths = [_download_coding_gguf(item, folder, opener, advance, check_cancel) for item in _CODING_V2_FILES]
+        modelfile = folder / "Modelfile"
+        lines = [_gguf_from_line(source) for source in paths]
+        lines += ["TEMPLATE {{ .Prompt }}", "RENDERER qwen3.5", "PARSER qwen3.5",
+                  "PARAMETER top_p 0.95", "PARAMETER presence_penalty 1.5", "PARAMETER temperature 1",
+                  "PARAMETER top_k 20", 'LICENSE """' + license_text + '"""']
+        modelfile.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        if CODING_V2_MODEL in list_models():
+            raise RuntimeError(f"{CODING_V2_MODEL} was installed by another window. Refresh the model list.")
+        check_cancel()
+        if progress is not None:
+            progress({"kind": "importing", "text": "Registering the verified model with local Ollama…"})
+        _create_local_model(CODING_V2_MODEL, modelfile)
+        if CODING_V2_MODEL not in list_models():
+            raise RuntimeError("The local engine did not confirm the installed model.")
+    _model_info.cache_clear()
+    if progress is not None:
+        progress({"kind": "success", "text": f"Installed {CODING_V2_MODEL}. Select it from the model list."})
 
 
 def _get(path: str, timeout: float = 3):
