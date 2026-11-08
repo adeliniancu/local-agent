@@ -459,6 +459,101 @@ class DesktopTests(unittest.TestCase):
         self.assertEqual(self.ui.custom_download_button.cget("state"), "normal")
         self.assertIn("That file could not be imported.", self.ui.transcript.get("1.0", "end"))
 
+    def test_coding_v2_install_is_explicit_and_blocked_during_a_task(self):
+        with patch("runtime.install_coding_v2", create=True) as install:
+            self.ui.toggle_settings()
+            install.assert_not_called()
+            self.ui._set_busy(True)
+            self.assertEqual(self.ui.install_coding_v2_button.cget("state"), "disabled")
+            self.ui.install_coding_v2()
+            install.assert_not_called()
+        self.assertFalse(self.ui.installing_coding_v2)
+
+    def test_coding_v2_install_refreshes_choices_without_changing_model_or_chat(self):
+        self.ui.history = [{"role": "user", "content": "Keep this chat"}]
+        selected = self.ui.model_var.get()
+        def install(*, progress, cancel_event):
+            self.assertFalse(cancel_event.is_set())
+            progress({"kind": "status", "text": "Verifying the download"})
+            progress({"kind": "progress", "done": 50, "total": 100})
+            progress({"kind": "importing", "text": "Registering"})
+            progress({"kind": "success", "text": "Installed"})
+        with patch("runtime.install_coding_v2", side_effect=install, create=True) as backend, \
+             patch.object(self.ui, "connect") as connect:
+            self.ui.install_coding_v2_button.invoke()
+            self.wait_for_model_operation()
+            backend.assert_called_once()
+            connect.assert_called_once()
+        self.ui._handle_event("connected", {"base_url": self.ui.base_url,
+                              "models": [selected, app.CODING_V2_MODEL]}, None)
+        self.assertEqual(self.ui.model_var.get(), selected)
+        self.assertEqual(self.ui.history, [{"role": "user", "content": "Keep this chat"}])
+        self.assertIn(app.CODING_V2_MODEL, self.ui.model_box.cget("values"))
+        self.assertEqual(self.ui.install_coding_v2_button.cget("text"), "Installed")
+        self.assertEqual(self.ui.install_coding_v2_button.cget("state"), "disabled")
+        self.assertIsNone(self.ui.pending_model_selection)
+
+    def test_coding_v2_only_install_still_waits_for_user_model_selection(self):
+        original = self.ui.model_var.get()
+        self.ui.preserve_model_selection_on_refresh = True
+        self.ui._handle_event("connected", {"base_url": self.ui.base_url, "models": [app.CODING_V2_MODEL]}, None)
+        self.assertEqual(self.ui.model_var.get(), original)
+        self.assertFalse(self.ui.ready)
+        self.ui.model_var.set(app.CODING_V2_MODEL)
+        self.ui._model_changed()
+        self.assertTrue(self.ui.ready)
+        self.assertTrue(self.ui._can_send())
+
+    def test_coding_v2_cancel_is_cooperative_and_restores_controls(self):
+        def install(*, progress, cancel_event):
+            if not cancel_event.wait(3):
+                raise AssertionError("Cancellation was not forwarded")
+            raise InterruptedError("Cancelled")
+        with patch("runtime.install_coding_v2", side_effect=install, create=True):
+            self.ui.install_coding_v2()
+            self.ui.cancel_coding_v2_button.invoke()
+            self.wait_for_model_operation()
+        self.assertFalse(self.ui.installing_coding_v2)
+        self.assertIn("cancelled", self.ui.coding_v2_status.cget("text"))
+        self.assertEqual(self.ui.update_button.cget("state"), "normal")
+        self.assertEqual(self.ui.install_coding_v2_button.cget("state"), "normal")
+
+    def test_coding_v2_import_disables_cancel_and_errors_stay_inline(self):
+        self.ui.installing_coding_v2 = self.ui.downloading = True
+        self.ui._handle_event("coding_v2_progress", {"kind": "progress", "done": 25, "total": 100}, None)
+        self.assertEqual(float(self.ui.coding_v2_progress.cget("value")), 25)
+        self.ui._handle_event("coding_v2_progress", {"kind": "importing", "text": "Registering"}, None)
+        self.assertEqual(self.ui.cancel_coding_v2_button.cget("state"), "disabled")
+        self.ui.cancel_coding_v2_install()
+        self.assertFalse(self.ui.coding_v2_cancel.is_set())
+        self.ui._handle_event("coding_v2_finished", {"error": "Model checksum failed"}, None)
+        self.assertIn("Model checksum failed", self.ui.transcript.get("1.0", "end"))
+        self.assertEqual(self.ui.update_button.cget("state"), "normal")
+
+    def test_close_waits_for_coding_v2_cleanup_and_keeps_current_idle_chat(self):
+        entered, release = threading.Event(), threading.Event()
+        def install(*, progress, cancel_event):
+            entered.set()
+            cancel_event.wait(3)
+            release.wait(3)
+            raise InterruptedError("Cancelled")
+        self.ui.history = [{"role": "user", "content": "Current chat"}]
+        self.ui.agent = SimpleNamespace(history=[{"role": "user", "content": "Old completed chat"}])
+        with patch("runtime.install_coding_v2", side_effect=install, create=True), patch.object(self.root, "destroy") as destroy:
+            self.ui.install_coding_v2()
+            self.assertTrue(entered.wait(2))
+            self.ui.close()
+            self.assertTrue(self.ui.coding_v2_cancel.is_set())
+            destroy.assert_not_called()
+            release.set()
+            deadline = time.monotonic() + 3
+            while not destroy.called and time.monotonic() < deadline:
+                self.root.update()
+                time.sleep(0.01)
+            destroy.assert_called_once()
+        self.ui.closing = False
+        self.assertEqual(json.loads(app.STATE.read_text())["history"][0]["content"], "Current chat")
+
     def attachment(self, name="example.txt", content="Reference text"):
         source = self.data / name
         source.write_text(content, encoding="utf-8")
