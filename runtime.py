@@ -161,12 +161,9 @@ def get_inference_options(model: str, profile: str = "auto") -> dict:
             return {"num_ctx": context, "num_gpu": max(0, min(999, int(override)))}
         except ValueError:
             pass
-    hardware = get_hardware_info()
-    # -1 asks Ollama's scheduler to fit layers dynamically using the actual
-    # weights, projector, context and device memory. A tag-size heuristic can
-    # underestimate offload, especially for hybrid vision models. The engine
-    # also owns unloading/reusing resident models and multi-GPU placement.
-    return {"num_ctx": context, "num_gpu": -1 if hardware.get("gpus") else 0}
+    # Ollama discovers compatible GPUs, fits the model across them, and falls
+    # back to CPU if none are available. nvidia-smi is only used for display.
+    return {"num_ctx": context, "num_gpu": -1}
 
 
 def get_generation_options(model: str, think: bool) -> dict:
@@ -506,6 +503,7 @@ def ensure_server() -> str:
             "OLLAMA_CONTEXT_LENGTH": "16384",
             "OLLAMA_NUM_PARALLEL": "1",
             "OLLAMA_MAX_LOADED_MODELS": "1",
+            "OLLAMA_SCHED_SPREAD": "1",
             "OLLAMA_KEEP_ALIVE": "2m",
         })
         with (ROOT / "logs" / "ollama.log").open("ab") as log:

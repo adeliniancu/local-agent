@@ -1695,18 +1695,13 @@ class LocalAgentApp:
         elif event == "hardware_info":
             self.hardware_checking = False
             gpus = payload.get("gpus") or []
-            if gpus:
-                gpu = gpus[0]
-                description = (f"{gpu.get('name', 'GPU')} · {gpu.get('free_mb', 0) / 1024:.1f} / "
-                               f"{gpu.get('total_mb', 0) / 1024:.1f} GB VRAM available")
-                if len(gpus) > 1:
-                    description += f" · {len(gpus)} GPUs detected"
-                description += " · Automatic GPU allocation; speed depends on model and free VRAM"
-            else:
-                description = "No NVIDIA GPU detected · CPU inference available"
+            lines = [f"{gpu.get('name', 'GPU')} · {gpu.get('free_mb', 0) / 1024:.1f} / "
+                     f"{gpu.get('total_mb', 0) / 1024:.1f} GB VRAM available" for gpu in gpus]
             if os.environ.get("LOCAL_AGENT_GPU_LAYERS") == "0":
-                description += " · CPU launcher active"
-            self.hardware_label.configure(text=description)
+                lines.append("CPU launcher active")
+            else:
+                lines.append("Ollama can split models across compatible GPUs.")
+            self.hardware_label.configure(text="\n".join(lines))
         elif event == "hardware_error":
             self.hardware_checking = False
             self.hardware_label.configure(text="Hardware details unavailable. CPU inference remains available.")

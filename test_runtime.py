@@ -31,9 +31,12 @@ class AllocationTests(unittest.TestCase):
                     self.assertEqual(-1,result['num_gpu'])
                     self.assertEqual(min(16384,info['context_length']),result['num_ctx'])
 
-    def test_no_detected_gpu_uses_cpu(self):
-        with patch.dict(os.environ, {}, clear=True), patch.object(runtime, 'get_model_info', return_value=QWEN_INFO), patch.object(runtime,'get_hardware_info',return_value={'gpus':[]}):
-            self.assertEqual({'num_ctx':16384,'num_gpu':0},runtime.get_inference_options(runtime.MODEL))
+    def test_gpu_allocation_does_not_depend_on_nvidia_hardware_probe(self):
+        with patch.dict(os.environ, {}, clear=True), \
+                patch.object(runtime, "get_model_info", return_value=QWEN_INFO), \
+                patch.object(runtime, "get_hardware_info", return_value={"gpus": []}) as probe:
+            self.assertEqual({"num_ctx": 16384, "num_gpu": -1}, runtime.get_inference_options(runtime.MODEL))
+            probe.assert_not_called()
 
     def test_cpu_and_launcher_override_skip_gpu_probe_but_validate_model(self):
         with patch.dict(os.environ, {"LOCAL_AGENT_GPU_LAYERS": "26"}), \
@@ -74,6 +77,21 @@ class AllocationTests(unittest.TestCase):
         with patch.dict(os.environ, {}, clear=True), patch.object(runtime,'get_model_info',return_value=QWEN_INFO), patch.object(runtime,'get_hardware_info',return_value=hardware()), patch.object(runtime,'_get') as request:
             self.assertEqual(-1,runtime.get_inference_options(runtime.MODEL)['num_gpu'])
             request.assert_not_called()
+
+
+class EngineTests(unittest.TestCase):
+    def test_engine_starts_with_multi_gpu_scheduling_and_cloud_disabled(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            ollama = root / "ollama.exe"
+            ollama.touch()
+            with patch.object(runtime, "ROOT", root), patch.object(runtime, "OLLAMA", ollama), \
+                    patch.object(runtime, "_get", side_effect=[OSError(), {"version": "test"}]), \
+                    patch.object(runtime.subprocess, "Popen", return_value=Mock(pid=123)) as start:
+                self.assertEqual(runtime.BASE_URL, runtime.ensure_server())
+            env = start.call_args.kwargs["env"]
+            self.assertEqual("1", env["OLLAMA_SCHED_SPREAD"])
+            self.assertEqual("1", env["OLLAMA_NO_CLOUD"])
 
 
 class ModelMetadataTests(unittest.TestCase):

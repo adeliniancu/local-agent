@@ -401,10 +401,13 @@ class DesktopTests(unittest.TestCase):
 
     def test_hardware_label_reports_real_memory_without_estimated_speed(self):
         self.ui._handle_event("hardware_info", {"gpus": [{"name": "NVIDIA RTX 5060",
-                              "total_mb": 8192, "free_mb": 5632, "used_mb": 2560}]}, None)
+                              "total_mb": 8192, "free_mb": 5632, "used_mb": 2560},
+                             {"name": "NVIDIA RTX 3080", "total_mb": 10240,
+                              "free_mb": 8704, "used_mb": 1536}]}, None)
         label = self.ui.hardware_label.cget("text")
         self.assertIn("NVIDIA RTX 5060", label)
         self.assertIn("5.5 / 8.0 GB", label)
+        self.assertIn("NVIDIA RTX 3080 · 8.5 / 10.0 GB", label)
         self.assertNotIn("tokens", label)
         self.assertIsNone(self.ui.last_tokens_per_second)
 
