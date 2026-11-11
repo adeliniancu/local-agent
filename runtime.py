@@ -483,12 +483,105 @@ def _get(path: str, timeout: float = 3):
         return json.load(response)
 
 
+def _engine_has_clients(pid: int) -> bool:
+    # The readiness request above has already closed its connection. Do not
+    # interrupt another caller's active request on this installation's port.
+    script = ("$ErrorActionPreference = 'Stop'; @(Get-NetTCPConnection | Where-Object { "
+              f"$_.OwningProcess -eq {pid} -and $_.LocalPort -eq {PORT} "
+              "-and $_.State -eq 'Established' }).Count | ConvertTo-Json -Compress")
+    result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
+                            capture_output=True, text=True, timeout=10,
+                            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    count = json.loads(result.stdout) if result.returncode == 0 else None
+    if type(count) is not int or count < 0:
+        raise OSError("Could not check whether the local engine has active requests.")
+    return count > 0
+
+
+def _engine_process_api():
+    from ctypes import wintypes
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    signatures = {
+        "OpenProcess": ((wintypes.DWORD, wintypes.BOOL, wintypes.DWORD), wintypes.HANDLE),
+        "QueryFullProcessImageNameW": ((wintypes.HANDLE, wintypes.DWORD, wintypes.LPWSTR,
+                                       ctypes.POINTER(wintypes.DWORD)), wintypes.BOOL),
+        "GetProcessTimes": ((wintypes.HANDLE,) + (ctypes.POINTER(wintypes.FILETIME),) * 4, wintypes.BOOL),
+        "TerminateProcess": ((wintypes.HANDLE, wintypes.UINT), wintypes.BOOL),
+        "WaitForSingleObject": ((wintypes.HANDLE, wintypes.DWORD), wintypes.DWORD),
+        "CloseHandle": ((wintypes.HANDLE,), wintypes.BOOL),
+    }
+    for name, (arguments, result) in signatures.items():
+        function = getattr(kernel, name)
+        function.argtypes, function.restype = arguments, result
+    return kernel
+
+
+def _restart_outdated_owned_engine() -> bool:
+    """Migrate an idle server after an app update, never by an unchecked PID."""
+    if os.name != "nt":
+        return False
+    marker = ROOT / "data/engine.pid"
+    try:
+        if any(path.is_symlink() or path.is_junction() for path in (marker.parent, marker)):
+            return False
+        if not marker.resolve().is_relative_to(ROOT.resolve()):
+            return False
+        with marker.open("rb") as handle:
+            data = handle.read(65)
+            stamp = os.fstat(handle.fileno()).st_mtime_ns
+        if len(data) > 64 or not re.fullmatch(rb"[0-9]+\s*", data):
+            return False
+        pid = int(data)
+        if not 0 < pid <= 0xFFFFFFFF or pid == os.getpid() or stamp >= Path(__file__).stat().st_mtime_ns:
+            return False
+        expected = OLLAMA.resolve(strict=True)
+        if not expected.is_relative_to(ROOT.resolve()) or not expected.is_file():
+            return False
+    except (OSError, ValueError):
+        return False
+    from ctypes import wintypes
+    kernel = _engine_process_api()
+    # Query, synchronize and terminate this same handle; never reopen the PID.
+    process = kernel.OpenProcess(0x00101001, False, pid)
+    if not process:
+        return False
+    try:
+        if kernel.WaitForSingleObject(process, 0) != 258:  # WAIT_TIMEOUT means alive.
+            return False
+        name = ctypes.create_unicode_buffer(32768)
+        size = wintypes.DWORD(len(name))
+        if not kernel.QueryFullProcessImageNameW(process, 0, name, ctypes.byref(size)):
+            return False
+        if Path(name.value).resolve() != expected:
+            return False
+        created, exited, cpu_kernel, cpu_user = (wintypes.FILETIME() for _ in range(4))
+        if not kernel.GetProcessTimes(process, ctypes.byref(created), ctypes.byref(exited),
+                                      ctypes.byref(cpu_kernel), ctypes.byref(cpu_user)):
+            return False
+        created_ns = (((created.dwHighDateTime << 32) | created.dwLowDateTime) - 116444736000000000) * 100
+        # A stale marker may now refer to a new process even with the same exe.
+        if created_ns > stamp or _engine_has_clients(pid):
+            return False
+        if not kernel.TerminateProcess(process, 0):
+            return kernel.WaitForSingleObject(process, 0) == 0
+        if kernel.WaitForSingleObject(process, 10000) != 0:
+            raise RuntimeError("The updated local engine is still restarting. Try Connect again shortly.")
+        return True
+    except (OSError, ValueError, subprocess.TimeoutExpired):
+        # Uncertain identity or activity must never prevent opening the app or
+        # cause termination of another installation's engine.
+        return False
+    finally:
+        kernel.CloseHandle(process)
+
+
 def ensure_server() -> str:
     """Return the local endpoint, starting our portable engine when necessary."""
     with _start_lock:
         try:
             _get("/api/version")
-            return BASE_URL
+            if not _restart_outdated_owned_engine():
+                return BASE_URL
         except (OSError, ValueError, urllib.error.URLError):
             pass
         if not OLLAMA.is_file():
