@@ -855,7 +855,13 @@ class Agent:
                     text += "\nAGENTS.md is longer than this excerpt. Inspect the full file for requirements relevant to your changes."
         except (ValueError, OSError, UnicodeError):
             pass
-        if self._response_recovery:
+        if self._response_recovery == "empty":
+            text += ("\nEMPTY-RESPONSE RECOVERY: The previous model response finished without an answer or tool call. "
+                     "No actions from that response were executed. Continue the current user task from the completed tool results. "
+                     "If the requested work is already complete, give a brief final answer grounded in those results. "
+                     "Otherwise return one small complete next action. Do not repeat successful checks or edits merely to produce an answer. "
+                     "Existing permissions still apply.")
+        elif self._response_recovery:
             text += ("\nRESPONSE-LIMIT RECOVERY: The previous response ended at its token limit. "
                      "Its draft and tool calls were incomplete and NO actions from it were executed. "
                      "Continue the current user task from the last completed tool result. "
@@ -918,9 +924,9 @@ class Agent:
 
     @staticmethod
     def _record_text(item):
-        if item.get("_response_truncated"):
+        if item.get("_response_truncated") or item.get("_response_empty"):
             return json.dumps({key: item[key] for key in
-                               ("content", "thinking", "_incomplete_tool_calls", "_response_truncated")
+                               ("content", "thinking", "_incomplete_tool_calls", "_response_truncated", "_response_empty")
                                if key in item}, ensure_ascii=False)
         if item.get("tool_calls"):
             return json.dumps({"content": item.get("content", ""), "tool_calls": item["tool_calls"]}, ensure_ascii=False)
@@ -1017,6 +1023,10 @@ class Agent:
         return len(json.dumps({"messages": text_messages, "tools": self._available_tools()}, ensure_ascii=False).encode("utf-8"))
 
     def _model_record(self, item):
+        if item.get("_response_empty"):
+            return {"role": "assistant", "content":
+                    "An earlier model response produced no answer or tool call. No actions ran in that response; "
+                    "continue from the preserved user request and completed tool results."}
         if item.get("_response_truncated"):
             # Raw drafts remain in saved history, but incomplete reasoning/code
             # must not look like an executed action or verified answer on retry.
@@ -1549,15 +1559,21 @@ class Agent:
                     self.emit("continuation", {"steps": step, "automatic": True})
                 self.emit("status", {"text": "Thinking locally…" if step == 0 else "Checking the results…"})
                 message = self._chat()
-                if message.get("_response_truncated"):
+                empty_response = not message.get("tool_calls") and not str(message.get("content", "")).strip()
+                if message.get("_response_truncated") or empty_response:
+                    if empty_response:
+                        message = {**message, "_response_empty": True}
                     self.history.append(message)
-                    self.emit("stream_reset", {"text": "The model response reached its limit; no incomplete actions were executed."})
+                    self.emit("stream_reset", {"text": "The model returned no answer or action." if empty_response else
+                                               "The model response reached its limit; no incomplete actions were executed."})
                     if response_recoveries:
-                        self._pause("Paused because the model reached its response limit again after one smaller-action recovery.")
+                        self._pause("Paused because the local model returned no answer or action after one recovery attempt."
+                                    if empty_response else "Paused because the model reached its response limit again after one smaller-action recovery.")
                         return
                     response_recoveries += 1
-                    self._response_recovery = True
-                    text = "Response limit reached. Trying one smaller complete action without extra reasoning; your reasoning preference stays unchanged."
+                    self._response_recovery = "empty" if empty_response else True
+                    text = ("The model returned no answer or action. Trying once without extra reasoning; completed work and your reasoning preference are preserved."
+                            if empty_response else "Response limit reached. Trying one smaller complete action without extra reasoning; your reasoning preference stays unchanged.")
                     self.emit("status", {"text": text})
                     self.emit("assistant", {"text": text})
                     continue
