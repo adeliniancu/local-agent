@@ -1559,7 +1559,8 @@ class Agent:
                     self.emit("continuation", {"steps": step, "automatic": True})
                 self.emit("status", {"text": "Thinking locally…" if step == 0 else "Checking the results…"})
                 message = self._chat()
-                empty_response = not message.get("tool_calls") and not str(message.get("content", "")).strip()
+                empty_response = (not message.get("_response_truncated") and not message.get("tool_calls")
+                                  and not str(message.get("content", "")).strip())
                 if message.get("_response_truncated") or empty_response:
                     if empty_response:
                         message = {**message, "_response_empty": True}
