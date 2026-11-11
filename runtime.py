@@ -486,15 +486,19 @@ def _get(path: str, timeout: float = 3):
 def _engine_has_clients(pid: int) -> bool:
     # The readiness request above has already closed its connection. Do not
     # interrupt another caller's active request on this installation's port.
-    script = ("$ErrorActionPreference = 'Stop'; @(Get-NetTCPConnection | Where-Object { "
+    script = ("$ErrorActionPreference = 'Stop'; $rows = @(Get-NetTCPConnection | Where-Object { "
               f"$_.OwningProcess -eq {pid} -and $_.LocalPort -eq {PORT} "
-              "-and $_.State -eq 'Established' }).Count | ConvertTo-Json -Compress")
+              "}); @{ listening = @($rows | Where-Object { $_.State -eq 'Listen' "
+              "-and $_.LocalAddress -eq '127.0.0.1' }).Count -eq 1; "
+              "clients = @($rows | Where-Object { $_.State -eq 'Established' }).Count } "
+              "| ConvertTo-Json -Compress")
     result = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", script],
                             capture_output=True, text=True, timeout=10,
                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
-    count = json.loads(result.stdout) if result.returncode == 0 else None
-    if type(count) is not int or count < 0:
-        raise OSError("Could not check whether the local engine has active requests.")
+    state = json.loads(result.stdout) if result.returncode == 0 else None
+    count = state.get("clients") if isinstance(state, dict) else None
+    if type(count) is not int or count < 0 or state.get("listening") is not True:
+        raise OSError("Could not verify ownership and activity of the local engine endpoint.")
     return count > 0
 
 

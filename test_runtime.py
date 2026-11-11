@@ -94,6 +94,165 @@ class EngineTests(unittest.TestCase):
             self.assertEqual("1", env["OLLAMA_NO_CLOUD"])
 
 
+@unittest.skipUnless(os.name == "nt", "Windows engine migration")
+class EngineMigrationTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory())).resolve()
+        self.marker = self.root / 'data/engine.pid'
+        self.marker.parent.mkdir()
+        self.marker.write_text('1234')
+        self.module = self.root / 'runtime.py'
+        self.module.write_text('# new runtime')
+        self.executable = self.root / 'runtime/ollama/ollama.exe'
+        self.executable.parent.mkdir(parents=True)
+        self.executable.write_bytes(b'fixture')
+        self.stamp = 1_700_000_000_000_000_000
+        os.utime(self.marker, ns=(self.stamp, self.stamp))
+        os.utime(self.module, ns=(self.stamp + 1_000_000_000,) * 2)
+        self.created_ns = self.stamp - 1_000_000_000
+        self.image_path = self.executable
+        self.kernel = Mock()
+        self.kernel.OpenProcess.return_value = 77
+        self.kernel.WaitForSingleObject.side_effect = [258, 0]
+        def query(_handle, _flags, buffer, _size):
+            buffer.value = str(self.image_path)
+            return True
+        def process_times(_handle, created, *_unused):
+            ticks = self.created_ns // 100 + 116444736000000000
+            created._obj.dwLowDateTime = ticks & 0xFFFFFFFF
+            created._obj.dwHighDateTime = ticks >> 32
+            return True
+        self.kernel.QueryFullProcessImageNameW.side_effect = query
+        self.kernel.GetProcessTimes.side_effect = process_times
+        self.kernel.TerminateProcess.return_value = True
+        self.enterContext(patch.object(runtime, 'ROOT', self.root))
+        self.enterContext(patch.object(runtime, 'OLLAMA', self.executable))
+        self.enterContext(patch.object(runtime, '__file__', str(self.module)))
+        self.factory = self.enterContext(patch.object(runtime, '_engine_process_api', return_value=self.kernel))
+        self.clients = self.enterContext(patch.object(runtime, '_engine_has_clients', return_value=False))
+
+    def test_owned_process_uses_same_verified_handle_and_next_start_is_not_restarted(self):
+        with patch.object(runtime, '_get', return_value={}), \
+                patch.object(runtime.subprocess, 'Popen', return_value=Mock(pid=777)) as spawn:
+            self.assertEqual(runtime.ensure_server(), runtime.BASE_URL)
+            self.assertEqual(runtime.ensure_server(), runtime.BASE_URL)
+        spawn.assert_called_once()
+        self.assertEqual(spawn.call_args.kwargs['env']['OLLAMA_SCHED_SPREAD'], '1')
+        self.kernel.OpenProcess.assert_called_once_with(0x00101001, False, 1234)
+        self.kernel.TerminateProcess.assert_called_once_with(77, 0)
+        self.kernel.CloseHandle.assert_called_once_with(77)
+        self.assertEqual(self.kernel.QueryFullProcessImageNameW.call_args.args[0], 77)
+        self.assertEqual(self.kernel.GetProcessTimes.call_args.args[0], 77)
+        self.assertEqual(self.marker.read_text(), '777')
+
+    def test_missing_invalid_or_new_marker_never_opens_process(self):
+        for content in ('', '-1', '4294967296', '1' * 65, 'not a pid', str(os.getpid())):
+            with self.subTest(content=content):
+                self.marker.write_text(content)
+                os.utime(self.marker, ns=(self.stamp,) * 2)
+                self.assertFalse(runtime._restart_outdated_owned_engine())
+        self.marker.write_text('1234')
+        self.assertFalse(runtime._restart_outdated_owned_engine())
+        self.marker.unlink()
+        self.assertFalse(runtime._restart_outdated_owned_engine())
+        self.factory.assert_not_called()
+
+    def test_foreign_executable_never_terminated(self):
+        self.image_path = self.root.parent / 'other-install/ollama.exe'
+        self.assertFalse(runtime._restart_outdated_owned_engine())
+        self.kernel.TerminateProcess.assert_not_called()
+        self.clients.assert_not_called()
+        self.kernel.CloseHandle.assert_called_once_with(77)
+
+    def test_reused_pid_for_same_executable_never_terminated(self):
+        self.created_ns = self.stamp + 100
+        self.assertFalse(runtime._restart_outdated_owned_engine())
+        self.kernel.TerminateProcess.assert_not_called()
+        self.clients.assert_not_called()
+        self.kernel.CloseHandle.assert_called_once_with(77)
+
+    def test_active_request_leaves_existing_engine_and_marker_untouched(self):
+        self.clients.return_value = True
+        original = self.marker.read_bytes(), self.marker.stat().st_mtime_ns
+        with patch.object(runtime, '_get', return_value={}), patch.object(runtime.subprocess, 'Popen') as spawn:
+            self.assertEqual(runtime.ensure_server(), runtime.BASE_URL)
+        spawn.assert_not_called()
+        self.kernel.TerminateProcess.assert_not_called()
+        self.kernel.CloseHandle.assert_called_once_with(77)
+        self.assertEqual((self.marker.read_bytes(), self.marker.stat().st_mtime_ns), original)
+
+    def test_inaccessible_or_exited_process_does_not_block_reuse(self):
+        self.kernel.OpenProcess.return_value = None
+        self.assertFalse(runtime._restart_outdated_owned_engine())
+        self.kernel.CloseHandle.assert_not_called()
+        self.kernel.OpenProcess.return_value = 77
+        self.kernel.WaitForSingleObject.side_effect = [0]
+        self.assertFalse(runtime._restart_outdated_owned_engine())
+        self.kernel.TerminateProcess.assert_not_called()
+        self.kernel.CloseHandle.assert_called_once_with(77)
+
+    def test_identity_or_client_query_failure_never_terminates(self):
+        for failure in ('path', 'time', 'clients'):
+            with self.subTest(failure=failure):
+                self.kernel.WaitForSingleObject.side_effect = [258]
+                self.kernel.QueryFullProcessImageNameW.return_value = False
+                original_path = self.kernel.QueryFullProcessImageNameW.side_effect
+                original_times = self.kernel.GetProcessTimes.side_effect
+                if failure == 'path':
+                    self.kernel.QueryFullProcessImageNameW.side_effect = None
+                elif failure == 'time':
+                    self.kernel.GetProcessTimes.side_effect = None
+                    self.kernel.GetProcessTimes.return_value = False
+                else:
+                    self.clients.side_effect = subprocess.TimeoutExpired('probe', 10)
+                self.assertFalse(runtime._restart_outdated_owned_engine())
+                self.kernel.QueryFullProcessImageNameW.side_effect = original_path
+                self.kernel.GetProcessTimes.side_effect = original_times
+        self.kernel.TerminateProcess.assert_not_called()
+        self.assertEqual(self.kernel.CloseHandle.call_count, 3)
+
+    def test_failed_termination_reuses_server_and_timeout_is_actionable(self):
+        self.kernel.TerminateProcess.return_value = False
+        self.kernel.WaitForSingleObject.side_effect = [258, 258]
+        self.assertFalse(runtime._restart_outdated_owned_engine())
+        self.kernel.TerminateProcess.return_value = True
+        self.kernel.WaitForSingleObject.side_effect = [258, 258]
+        with self.assertRaisesRegex(RuntimeError, 'Try Connect'):
+            runtime._restart_outdated_owned_engine()
+        self.assertEqual(self.kernel.CloseHandle.call_count, 2)
+
+    def test_failed_replacement_start_preserves_old_marker(self):
+        with patch.object(runtime, '_get', side_effect=[{}, OSError('not ready')]), \
+                patch.object(runtime.subprocess, 'Popen', return_value=Mock(pid=777, poll=Mock(return_value=1))):
+            with self.assertRaisesRegex(RuntimeError, 'could not start'):
+                runtime.ensure_server()
+        self.assertEqual(self.marker.read_text(), '1234')
+
+
+class EngineClientProbeTests(unittest.TestCase):
+    def test_checks_owned_listener_and_clients_on_the_configured_port(self):
+        for count in (0, 1):
+            with patch.object(runtime.subprocess, 'run', return_value=Mock(returncode=0,
+                    stdout=json.dumps({'listening': True, 'clients': count}))) as run:
+                self.assertEqual(runtime._engine_has_clients(1234), bool(count))
+        command = run.call_args.args[0][-1]
+        self.assertIn('OwningProcess -eq 1234', command)
+        self.assertIn(f'LocalPort -eq {runtime.PORT}', command)
+        self.assertIn("State -eq 'Established'", command)
+        self.assertIn("State -eq 'Listen'", command)
+        self.assertIn("LocalAddress -eq '127.0.0.1'", command)
+        self.assertIn("ErrorActionPreference = 'Stop'", command)
+
+    def test_probe_errors_or_missing_listener_are_not_mistaken_for_idle(self):
+        for code, output in ((1, '{}'), (0, 'null'), (0, 'true'), (0, 'invalid'),
+                             (0, '{"listening": false, "clients": 0}'),
+                             (0, '{"listening": true, "clients": true}')):
+            with self.subTest(code=code, output=output), \
+                    patch.object(runtime.subprocess, 'run', return_value=Mock(returncode=code, stdout=output)):
+                with self.assertRaises((OSError, ValueError)):
+                    runtime._engine_has_clients(1234)
+
+
 class ModelMetadataTests(unittest.TestCase):
     def setUp(self):
         runtime._model_info.cache_clear()
